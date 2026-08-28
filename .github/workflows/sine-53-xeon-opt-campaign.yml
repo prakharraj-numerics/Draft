@@ -1,0 +1,112 @@
+name: Sine 53-bit Xeon optimization campaign
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ sine53-xeon-tuned-v2 ]
+    paths:
+      - 'make_sine_53_xeon_opt_campaign.py'
+      - '.github/workflows/sine-53-xeon-opt-campaign.yml'
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
+    runs-on: ubuntu-24.04
+    env:
+      FLINT_PREFIX: /home/runner/flint36
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect eligible Intel AVX-512
+        id: cpu
+        shell: bash
+        run: |
+          set -euo pipefail
+          lscpu | grep -E 'Architecture|Vendor ID|Model name|CPU\(s\)|MHz|L1d cache|L2 cache|L3 cache'
+          VENDOR="$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/,"",$2); print $2}')"
+          if [ "$VENDOR" = GenuineIntel ] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f; then
+            echo eligible=1 >> "$GITHUB_OUTPUT"
+          else
+            echo eligible=0 >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Dependencies
+        if: steps.cpu.outputs.eligible == '1'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential curl xz-utils libgmp-dev libmpfr-dev gpg-agent wget ca-certificates
+          wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg >/dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main' | sudo tee /etc/apt/sources.list.d/oneAPI.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends intel-oneapi-mkl-devel intel-oneapi-compiler-dpcpp-cpp
+
+      - name: FLINT cache
+        if: steps.cpu.outputs.eligible == '1'
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/flint36
+          key: flint-3.6.0-ubuntu24-x86_64-native-${{ hashFiles('sine_53_coeff_source.c') }}-v2
+
+      - name: Build FLINT if absent
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "$FLINT_PREFIX/lib/libflint.so" ]; then
+            curl -L -o /tmp/flint.tar.gz https://github.com/flintlib/flint/releases/download/v3.6.0/flint-3.6.0.tar.gz
+            tar -xzf /tmp/flint.tar.gz -C /tmp
+            cd /tmp/flint-3.6.0
+            ./configure --prefix="$FLINT_PREFIX" --with-gmp=/usr --with-mpfr=/usr
+            make -j2
+            make install
+          fi
+
+      - name: Generate exact variants
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
+          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
+          python3 make_sine_53_xeon_v12_batch.py
+          cp bench_sine_53_xeon_v12_build.c bench_sine_53_v12_baseline_build.c
+          python3 make_sine_53_xeon_opt_campaign.py
+
+      - name: Compile all on same Xeon
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          CC=/opt/intel/oneapi/compiler/latest/bin/icx
+          INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
+          LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
+          for v in v12_baseline qfloor interleave_x2 interleave_x3 interleave_x4; do
+            "$CC" -O3 -xHost -fp-model=precise $INC "bench_sine_53_${v}_build.c" -o "/tmp/s53_${v}" $LIBS
+          done
+
+      - name: Run certification and same-host timing
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:$MKLROOT/lib:${LD_LIBRARY_PATH:-}"
+          for v in v12_baseline qfloor interleave_x2 interleave_x3 interleave_x4; do
+            echo "===== VARIANT $v ====="
+            stdbuf -oL -eL "/tmp/s53_${v}" 2>&1 | tee "/tmp/${v}.txt"
+          done
+
+      - name: Upload logs
+        if: always() && steps.cpu.outputs.eligible == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sine53-xeon-opt-${{ matrix.slot }}
+          path: /tmp/*.txt
+          if-no-files-found: ignore
