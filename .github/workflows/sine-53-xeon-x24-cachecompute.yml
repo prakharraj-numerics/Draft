@@ -1,0 +1,128 @@
+name: Sine 53-bit Xeon X24 cache-compute sweep
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ sine53-xeon-tuned-v2 ]
+    paths:
+      - '.github/workflows/sine-53-xeon-x24-cachecompute.yml'
+      - 'make_sine_53_xeon_x24_cachecompute.py'
+
+env:
+  FLINT_PREFIX: /home/runner/flint36
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect Xeon AVX512
+        id: cpu
+        shell: bash
+        run: |
+          VENDOR="$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/,"",$2); print $2}')"
+          lscpu | grep -E 'Vendor ID|Model name|CPU\(s\)|L1d cache|L2 cache|L3 cache'
+          if [ "$VENDOR" = GenuineIntel ] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f; then echo eligible=1 >> "$GITHUB_OUTPUT"; else echo eligible=0 >> "$GITHUB_OUTPUT"; fi
+
+      - name: oneAPI cache
+        if: steps.cpu.outputs.eligible == '1'
+        uses: actions/cache@v4
+        with:
+          path: /opt/intel/oneapi
+          key: intel-oneapi-prof3-intel-2026.1.0-236-2026.1.1-325-v1
+
+      - name: Base dev packages
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \( -iname '*microsoft*' -o -iname '*azure*' \) -delete || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential libgmp-dev libmpfr-dev
+
+      - name: FLINT cache
+        if: steps.cpu.outputs.eligible == '1'
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/flint36
+          key: flint-3.6.0-ubuntu24-x86_64-native-cd49f6116fb977da331dbb6627f4998397730a62253bd7a70a201ad5a00576d7-v2
+
+      - name: Build FLINT if absent
+        if: steps.cpu.outputs.eligible == '1'
+        run: |
+          if [ ! -f "$FLINT_PREFIX/lib/libflint.so" ]; then
+            curl -L -o /tmp/f.tgz https://github.com/flintlib/flint/releases/download/v3.6.0/flint-3.6.0.tar.gz
+            tar -xzf /tmp/f.tgz -C /tmp
+            cd /tmp/flint-3.6.0
+            ./configure --prefix="$FLINT_PREFIX" --with-gmp=/usr --with-mpfr=/usr
+            make -j2
+            make install
+          fi
+
+      - name: Generate and compile cache-compute variants
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          CC=/opt/intel/oneapi/compiler/latest/bin/icx
+          INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
+          LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
+
+          # Baseline: current champion X23-H14, K=256, degree 5, 403 anchors.
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
+          python3 make_sine_53_xeon_x23_hybridpi.py 14
+          cp bench_sine_53_xeon_x23_h14_build.c /tmp/k256d5.c
+          python3 inject_sine53_unique9600.py /tmp/k256d5.c
+          "$CC" -O3 -xHost -fp-model=precise $INC /tmp/k256d5.c -o /tmp/k256d5 $LIBS
+
+          # K=512: c0/c1 payload ~= 12.9 KiB; degree 4 deletes c5 reconstruction + one FMA.
+          sed -i 's/#define SF_K 8/#define SF_K 9/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N 403UL/#define SF_LUT_N 805UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 256.0/#define KGRID 512.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/256.0)|#define INVK (1.0/512.0)|' bench_sine_53_wide_intel.c
+          python3 make_sine_53_xeon_x24_cachecompute.py
+          cp bench_sine_53_xeon_x24_build.c /tmp/k512d4.c
+          python3 inject_sine53_unique9600.py /tmp/k512d4.c
+          "$CC" -O3 -xHost -fp-model=precise $INC /tmp/k512d4.c -o /tmp/k512d4 $LIBS
+
+          # K=1024: c0/c1 payload ~= 25.7 KiB, still L1-sized on these Xeons; same degree 4.
+          sed -i 's/#define SF_K 9/#define SF_K 10/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N 805UL/#define SF_LUT_N 1609UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 512.0/#define KGRID 1024.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/512.0)|#define INVK (1.0/1024.0)|' bench_sine_53_wide_intel.c
+          python3 make_sine_53_xeon_x24_cachecompute.py
+          cp bench_sine_53_xeon_x24_build.c /tmp/k1024d4.c
+          python3 inject_sine53_unique9600.py /tmp/k1024d4.c
+          "$CC" -O3 -xHost -fp-model=precise $INC /tmp/k1024d4.c -o /tmp/k1024d4 $LIBS
+
+      - name: Run cache-compute sweep
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set +e
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:$MKLROOT/lib:${LD_LIBRARY_PATH:-}"
+          echo X23_K256_D5
+          stdbuf -oL -eL /tmp/k256d5 2>&1 | tee /tmp/x24-k256d5.txt
+          echo X24_K512_D4
+          stdbuf -oL -eL /tmp/k512d4 2>&1 | tee /tmp/x24-k512d4.txt
+          echo X24_K1024_D4
+          stdbuf -oL -eL /tmp/k1024d4 2>&1 | tee /tmp/x24-k1024d4.txt
+          exit 0
+
+      - name: Upload logs
+        if: steps.cpu.outputs.eligible == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sine53-x24-cachecompute-${{ matrix.slot }}
+          path: /tmp/x24-*.txt
+          if-no-files-found: ignore
