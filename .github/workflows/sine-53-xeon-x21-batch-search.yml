@@ -1,0 +1,102 @@
+name: Sine 53-bit Xeon x21 custom batch search
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ sine53-xeon-tuned-v2 ]
+    paths:
+      - 'make_sine_53_xeon_x21_batch_search.py'
+      - '.github/workflows/sine-53-xeon-x21-batch-search.yml'
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      FLINT_PREFIX: /home/runner/flint36
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect Xeon AVX512
+        id: cpu
+        shell: bash
+        run: |
+          VENDOR="$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/,"",$2); print $2}')"
+          lscpu | grep -E 'Vendor ID|Model name|CPU\(s\)|L1d cache|L2 cache|L3 cache'
+          if [ "$VENDOR" = GenuineIntel ] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f; then echo eligible=1 >> "$GITHUB_OUTPUT"; else echo eligible=0 >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/cache@v4
+        if: steps.cpu.outputs.eligible == '1'
+        id: oneapi
+        with:
+          path: /opt/intel/oneapi
+          key: intel-oneapi-prof3-intel-2026.1.0-236-2026.1.1-325-v1
+      - name: Dependencies on cache miss
+        if: steps.cpu.outputs.eligible == '1' && steps.oneapi.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \( -iname '*microsoft*' -o -iname '*azure*' \) -delete || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential curl xz-utils libgmp-dev libmpfr-dev gpg-agent wget ca-certificates
+          wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg >/dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main' | sudo tee /etc/apt/sources.list.d/oneAPI.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends intel-oneapi-mkl-devel intel-oneapi-compiler-dpcpp-cpp
+      - name: Base dev packages on cache hit
+        if: steps.cpu.outputs.eligible == '1' && steps.oneapi.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \( -iname '*microsoft*' -o -iname '*azure*' \) -delete || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential libgmp-dev libmpfr-dev
+      - uses: actions/cache@v4
+        if: steps.cpu.outputs.eligible == '1'
+        with:
+          path: /home/runner/flint36
+          key: flint-3.6.0-ubuntu24-x86_64-native-cd49f6116fb977da331dbb6627f4998397730a62253bd7a70a201ad5a00576d7-v2
+      - name: Build FLINT if absent
+        if: steps.cpu.outputs.eligible == '1'
+        run: |
+          if [ ! -f "$FLINT_PREFIX/lib/libflint.so" ]; then curl -L -o /tmp/f.tgz https://github.com/flintlib/flint/releases/download/v3.6.0/flint-3.6.0.tar.gz; tar -xzf /tmp/f.tgz -C /tmp; cd /tmp/flint-3.6.0; ./configure --prefix="$FLINT_PREFIX" --with-gmp=/usr --with-mpfr=/usr; make -j2; make install; fi
+      - name: Generate and compile search family
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
+          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
+          MKLROOT=/opt/intel/oneapi/mkl/latest; CC=/opt/intel/oneapi/compiler/latest/bin/icx
+          INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
+          LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
+          for spec in plane:2 plane:3 plane:4 plane:5 plane:6 pair:3 pair:4 pair:5 pair:6 sqrt:4 sqrt:6; do
+            mode=${spec%:*}; g=${spec#*:}
+            python3 make_sine_53_xeon_x21_batch_search.py "$mode" "$g"
+            src="bench_sine_53_xeon_x21_${mode}_g${g}_build.c"
+            cp "$src" "/tmp/${mode}g${g}.c"
+            python3 inject_sine53_unique9600.py "/tmp/${mode}g${g}.c"
+            "$CC" -O3 -xHost -fp-model=precise $INC "/tmp/${mode}g${g}.c" -o "/tmp/${mode}g${g}" $LIBS
+          done
+      - name: Run batch search
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set +e
+          MKLROOT=/opt/intel/oneapi/mkl/latest; export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:$MKLROOT/lib:${LD_LIBRARY_PATH:-}"
+          for spec in plane:2 plane:3 plane:4 plane:5 plane:6 pair:3 pair:4 pair:5 pair:6 sqrt:4 sqrt:6; do
+            mode=${spec%:*}; g=${spec#*:}
+            echo "X21_${mode}_G${g}"; stdbuf -oL -eL "/tmp/${mode}g${g}" 2>&1 | tee "/tmp/x21-${mode}-g${g}.txt"
+          done
+          exit 0
+      - name: Upload logs
+        if: always() && steps.cpu.outputs.eligible == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sine53-x21-${{ matrix.slot }}
+          path: /tmp/x21-*.txt
+          if-no-files-found: ignore
