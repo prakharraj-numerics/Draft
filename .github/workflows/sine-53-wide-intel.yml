@@ -7,7 +7,7 @@ on:
     paths:
       - '.github/workflows/sine-53-wide-intel.yml'
       - 'bench_sine_53_wide_intel.c'
-      - 'bench_sine_53_wide_fast2.c'
+      - 'bench_sine_53_wide_fast3.c'
       - 'sine_53_coeff_source.c'
 
 permissions:
@@ -72,23 +72,23 @@ jobs:
           make install >/dev/null
       - name: Extend Mode-5 LUT through pi over 2
         run: sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 6435UL/' sine_53_coeff_source.c
-      - name: Build and run optimized wide benchmark
+      - name: Build and run two-gather wide benchmark
         run: |
           set -euo pipefail
           MKLROOT=/opt/intel/oneapi/mkl/latest
           export LD_LIBRARY_PATH="${FLINT_PREFIX}/lib:${MKLROOT}/lib:${LD_LIBRARY_PATH:-}"
-          gcc -O3 -march=native -DNDEBUG -I"${FLINT_PREFIX}/include" -I"${MKLROOT}/include" -I. bench_sine_53_wide_fast2.c -L"${FLINT_PREFIX}/lib" -Wl,-rpath,"${FLINT_PREFIX}/lib" -lflint -lmpfr -lgmp -L"${MKLROOT}/lib" -Wl,-rpath,"${MKLROOT}/lib" -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl -o /tmp/sine53-fast2
+          gcc -O3 -march=native -DNDEBUG -I"${FLINT_PREFIX}/include" -I"${MKLROOT}/include" -I. bench_sine_53_wide_fast3.c -L"${FLINT_PREFIX}/lib" -Wl,-rpath,"${FLINT_PREFIX}/lib" -lflint -lmpfr -lgmp -L"${MKLROOT}/lib" -Wl,-rpath,"${MKLROOT}/lib" -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl -o /tmp/sine53-fast3
           {
-            echo 'S53F2_CPU_BEGIN'
+            echo 'S53F3_CPU_BEGIN'
             lscpu | grep -E 'Architecture|Vendor ID|Model name|CPU\(s\)'
             grep -m1 '^flags' /proc/cpuinfo
-            echo 'S53F2_CPU_END'
-            stdbuf -oL -eL /tmp/sine53-fast2
+            echo 'S53F3_CPU_END'
+            stdbuf -oL -eL /tmp/sine53-fast3
           } 2>&1 | tee /tmp/sine53-wide.txt
       - name: Upload trace
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: sine-53-wide-fast2-slot-${{ matrix.slot }}
+          name: sine-53-wide-fast3-slot-${{ matrix.slot }}
           path: /tmp/sine53-wide.txt
           if-no-files-found: warn
