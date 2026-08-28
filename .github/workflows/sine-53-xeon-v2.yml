@@ -85,6 +85,23 @@ jobs:
           sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
           sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
           python3 make_sine_53_xeon_v1.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('bench_sine_53_xeon_v2_build.c')
+          s=p.read_text()
+          old1='if(!verify_x2("legacy_npi_npi2_stress",k,st,STRESS)){free(st);kernel_destroy(k);redtab2_clear();return 6;}free(st);'
+          new1='int diag_ok=1;if(!verify_x2("legacy_npi_npi2_stress",k,st,STRESS)){diag_ok=0;}free(st);'
+          old2='if(!verify_x2("all_npi4_boundary_stress",k,os,OSTRESS)){free(os);kernel_destroy(k);redtab2_clear();return 8;}free(os);'
+          new2='if(!verify_x2("all_npi4_boundary_stress",k,os,OSTRESS)){diag_ok=0;}free(os);'
+          old3='int rc=bench_x2(k,x);kernel_destroy(k);redtab2_clear();flint_cleanup_master();return rc;'
+          new3='int rc=bench_x2(k,x);kernel_destroy(k);redtab2_clear();flint_cleanup_master();if(!diag_ok)return 6;return rc;'
+          for old,new in ((old1,new1),(old2,new2),(old3,new3)):
+              if old not in s:
+                  raise SystemExit('diagnostic timing patch marker not found: '+old[:48])
+              s=s.replace(old,new,1)
+          p.write_text(s)
+          print('S53X2_DIAG_TIMING_PATCH_PASS timing_runs_before_stress_exit=1')
+          PY
           gcc -O3 -march=native -DNDEBUG -I"${FLINT_PREFIX}/include" -I"${MKLROOT}/include" -I. bench_sine_53_xeon_v2_build.c \
             -L"${FLINT_PREFIX}/lib" -Wl,-rpath,"${FLINT_PREFIX}/lib" -lflint -lmpfr -lgmp \
             -L"${MKLROOT}/lib" -Wl,-rpath,"${MKLROOT}/lib" -Wl,--no-as-needed \
