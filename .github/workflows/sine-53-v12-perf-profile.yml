@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32]
     runs-on: ubuntu-24.04
     timeout-minutes: 40
 
@@ -155,7 +155,6 @@ jobs:
           perf stat -r 5 -e "$EVENTS" -- /tmp/s53prof intel 30000 >> /tmp/perf-stat.txt 2>&1
           echo S53PROF_INTEL_STAT_END >> /tmp/perf-stat.txt
 
-          # Width-specific FP-retirement event where the host exposes one.
           if perf list 2>/dev/null | grep -qi 'fp_arith_inst_retired.512b_packed_double'; then
             perf stat -r 3 -e fp_arith_inst_retired.512b_packed_double -- /tmp/s53prof ours 30000 > /tmp/perf-512-ours.txt 2>&1
             perf stat -r 3 -e fp_arith_inst_retired.512b_packed_double -- /tmp/s53prof intel 30000 > /tmp/perf-512-intel.txt 2>&1
