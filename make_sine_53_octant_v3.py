@@ -53,8 +53,7 @@ new_vec = r'''OVEC static void octant_vector_v2(const s53w_kernel *k,const doubl
 
         /* Key cosine-derived improvement: do NOT form w and then subtract it
            from pi/4 or pi/2.  Select the appropriate multiple m*pi/4 and form
-           the final folded angle directly.  This removes the second
-           cancellation which cost up to ~9 ULP on the first AVX port. */
+           the final folded angle directly. */
         __m512d md=kd;
         md=_mm512_mask_add_pd(md,am1,md,VM1);
         md=_mm512_mask_add_pd(md,ap2,md,VP2);
@@ -67,9 +66,7 @@ new_vec = r'''OVEC static void octant_vector_v2(const s53w_kernel *k,const doubl
         __m512d y=_mm512_mask_mov_pd(yp,rev,yn);
         y=_mm512_mask_mov_pd(y,unit,ax);
 
-        /* Guarded lanes are overwritten by the DD fallback below.  Zero them
-           before the gather so even a quotient exactly on the other side of a
-           boundary can never create a negative/out-of-range LUT index. */
+        /* Guarded lanes are overwritten by the DD fallback below. */
         y=_mm512_mask_mov_pd(y,guarded,Z);
 
         __mmask8 signmask=(__mmask8)(((wide_neg^inneg)&wide)|(inneg&unit));
@@ -99,6 +96,28 @@ new_guard = r'''static int guard_count_v2(const double *x,int n)
 }'''
 src = src[:gs] + new_guard + src[ge:]
 
+# On a <=1 ULP verification failure, expose whether the already-proven DD
+# fallback would repair that exact lane and show its octant/fold geometry.
+needle = 'uq++;uint64_t uo=ulpd(o[i],a),ui=ulpd(in[i],a);if(!uo)oe++;if(uo<=1)o1++;if(uo>om)om=uo;if(!ui)ie++;if(ui<=1)i1++;if(ui>im)im=ui;'
+repl = r'''uq++;uint64_t uo=ulpd(o[i],a),ui=ulpd(in[i],a);
+        if(uo>1){
+            double xx=x[i],axx=fabs(xx),qf=axx*FOUR_OVER_PI,qd=trunc(qf),frac=qf-qd;
+            int qi=(int)qd,oct=qi&7,m=qi,rev=0;
+            if(oct==1||oct==5)m=qi-1;
+            else if(oct==2||oct==6){m=qi+2;rev=1;}
+            else if(oct==3||oct==7){m=qi+1;rev=1;}
+            double yy=rev?fma((double)m,PIO4_HI,-axx):fma(-(double)m,PIO4_HI,axx);
+            yy=rev?fma((double)m,PIO4_LO,yy):fma(-(double)m,PIO4_LO,yy);
+            double sf=scalar2(k,xx);uint64_t su=ulpd(sf,a);double ft=BOUND_TAU*FOUR_OVER_PI;
+            int gd=(axx>=1.0)&&(frac<ft||frac>1.0-ft);
+            printf("S53O3_MISS tag=%s i=%d x=%.17g ours=%.17g ref=%.17g ulp=%lu scalar_dd=%.17g scalar_dd_ulp=%lu q=%d oct=%d m=%d folded_y=%.17g frac=%.17g guarded=%d\n",
+                   tag,i,xx,o[i],a,(unsigned long)uo,sf,(unsigned long)su,qi,oct,m,yy,frac,gd);
+        }
+        if(!uo)oe++;if(uo<=1)o1++;if(uo>om)om=uo;if(!ui)ie++;if(ui<=1)i1++;if(ui>im)im=ui;'''
+if needle not in src:
+    raise SystemExit('verify needle missing')
+src = src.replace(needle,repl,1)
+
 src = src.replace('S53O2_', 'S53O3_')
 src = src.replace('octant_v2', 'octant_v3')
 src = src.replace('_v2', '_v3')
@@ -106,4 +125,4 @@ src = src.replace('guarded_v2', 'guarded_v3')
 src = src.replace('cosine_style_pi4_octant_guarded_v2', 'cosine_style_pi4_octant_guarded_v3_direct_multiple')
 src = src.replace('AVX512_pi4_octant_int32_split', 'AVX512_pi4_octant_direct_multiple_int32_split')
 Path('bench_sine_53_wide_octant_v3_build.c').write_text(src)
-print('S53O3_BUILD_PASS direct_multiple_fold=1 rare_dd_boundary=1 unit_direct=1')
+print('S53O3_BUILD_PASS direct_multiple_fold=1 rare_dd_boundary=1 unit_direct=1 miss_diag=1')
