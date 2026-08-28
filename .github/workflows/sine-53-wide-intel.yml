@@ -78,6 +78,7 @@ jobs:
           set -euo pipefail
           MKLROOT=/opt/intel/oneapi/mkl/latest
           export LD_LIBRARY_PATH="${FLINT_PREFIX}/lib:${MKLROOT}/lib:${LD_LIBRARY_PATH:-}"
+          sed -i 's/^int main(void)$/int s53w_dd_driver_main(void)/' bench_sine_53_wide_dd_driver.c
           gcc -O3 -march=native -DNDEBUG -I"${FLINT_PREFIX}/include" -I"${MKLROOT}/include" -I. bench_sine_53_wide_dd_debug.c -L"${FLINT_PREFIX}/lib" -Wl,-rpath,"${FLINT_PREFIX}/lib" -lflint -lmpfr -lgmp -L"${MKLROOT}/lib" -Wl,-rpath,"${MKLROOT}/lib" -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl -o /tmp/sine53-debug
           stdbuf -oL -eL /tmp/sine53-debug 2>&1 | tee /tmp/sine53-wide.txt
       - name: Upload trace
