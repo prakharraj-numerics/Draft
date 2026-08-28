@@ -8,12 +8,6 @@ import runpy
 runpy.run_path('make_sine_53_xeon_v12_batch.py', run_name='__main__')
 src=Path('bench_sine_53_xeon_v12_build.c').read_text()
 
-# Free qfloor cleanup first.
-old='__m512d qfloor=_mm512_roundscale_pd(qf,_MM_FROUND_TO_ZERO|_MM_FROUND_NO_EXC);'
-new='__m512d qfloor=_mm512_cvtepi32_pd(qi);'
-if old not in src: raise SystemExit('qfloor pattern missing')
-src=src.replace(old,new)
-
 marker='''        /* Phase 2: homogeneous Mode-5 work; same six coefficients/FMA order. */\n        for(size_t b=0;b<blocks;b++){\n            __m512d rh=_mm512_load_pd(rhbuf+b*8),rl=_mm512_load_pd(rlbuf+b*8);\n            __m512d p=unitbuf[b]?mode5_poly_x11(k,rh,(__mmask8)signbuf[b]):\n                                    mode5_poly_low_x11(k,rh,rl,(__mmask8)signbuf[b]);\n            _mm512_mask_storeu_pd(out+tile+b*8,(__mmask8)activebuf[b],p);\n        }\n'''
 if marker not in src: raise SystemExit('phase2 marker missing')
 
@@ -51,4 +45,4 @@ repl=r'''        /* Phase 2 grouping diagnostic: same j,d and coefficient bits,
 src=src.replace(marker,repl)
 src=src.replace('S53X12_','S53GRP_').replace('xeon_v12_tiled_two_stage_batch','xeon_v12_anchor_group_scalar_coeff_loads')
 Path('bench_sine_53_grouping_build.c').write_text(src)
-print('S53GRP_BUILD_PASS same_secant_Mode5_spine=1 same_coeff_bits=1 same_anchor_rule_nearest_even=1 same_delta_formula=1 same_Horner_FMA_order=1 gather_eliminated=1 anchor_bucket_tile=256 diagnostic_only=1')
+print('S53GRP_BUILD_PASS exact_v12_reducer=1 same_secant_Mode5_spine=1 same_coeff_bits=1 same_anchor_rule_nearest_even=1 same_delta_formula=1 same_Horner_FMA_order=1 gather_eliminated=1 anchor_bucket_tile=256 diagnostic_only=1')
