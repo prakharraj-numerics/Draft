@@ -6,6 +6,7 @@ on:
     branches: [ sine53-xeon-tuned-v2 ]
     paths:
       - '.github/workflows/sine-53-xeon-x27-speed-ceiling.yml'
+      - 'patch_sine53_x27_speed_ceiling.py'
 
 env:
   FLINT_PREFIX: /home/runner/flint36
@@ -29,7 +30,6 @@ jobs:
           if [ "$VENDOR" = GenuineIntel ] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f; then echo eligible=1 >> "$GITHUB_OUTPUT"; else echo eligible=0 >> "$GITHUB_OUTPUT"; fi
       - uses: actions/cache@v4
         if: steps.cpu.outputs.eligible == '1'
-        id: oneapi
         with:
           path: /opt/intel/oneapi
           key: intel-oneapi-prof3-intel-2026.1.0-236-2026.1.1-325-v1
@@ -59,22 +59,15 @@ jobs:
           INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
           LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
           for v in x23 x27; do
-            if [ "$v" = x23 ]; then python3 make_sine_53_xeon_x23_hybridpi.py 14; cp bench_sine_53_xeon_x23_h14_build.c /tmp/$v.c; else python3 make_sine_53_xeon_x27_formula_evenodd.py; cp bench_sine_53_xeon_x27_formula_evenodd_build.c /tmp/$v.c; fi
+            if [ "$v" = x23 ]; then
+              python3 make_sine_53_xeon_x23_hybridpi.py 14
+              cp bench_sine_53_xeon_x23_h14_build.c /tmp/$v.c
+            else
+              python3 make_sine_53_xeon_x27_formula_evenodd.py
+              cp bench_sine_53_xeon_x27_formula_evenodd_build.c /tmp/$v.c
+            fi
             python3 inject_sine53_unique9600.py /tmp/$v.c
-            python3 - /tmp/$v.c <<'PY'
-from pathlib import Path
-import sys
-p=Path(sys.argv[1]); s=p.read_text()
-# Diagnostic only: keep printing the unique Arb result but don't block timing.
-s=s.replace('if(!verify_v8("unique9600",k,x,n)){printf("S53UNIQ_INVALID accuracy_gate=fail\\n");free(yi);free(yo);free(x);return;}',
-'''int uq_ok=verify_v8("unique9600",k,x,n); printf("S53UNIQ_DIAGNOSTIC accuracy_ok=%d timing_even_if_invalid=1\\n",uq_ok);''')
-# Put repeated and unique timing before the normal certification suite so X27's
-# known legacy failure cannot prevent the diagnostic timings.
-old='int rc=bench_v8(k,x);bench_batches_x11(k,x);bench_unique9600(k);kernel_destroy(k);redtab2_clear();flint_cleanup_master();return rc;'
-new='bench_batches_x11(k,x);bench_unique9600(k);int rc=bench_v8(k,x);kernel_destroy(k);redtab2_clear();flint_cleanup_master();return rc;'
-if old not in s: raise SystemExit('diagnostic main tail marker missing')
-s=s.replace(old,new,1); p.write_text(s)
-PY
+            python3 patch_sine53_x27_speed_ceiling.py /tmp/$v.c
             "$CC" -O3 -xHost -fp-model=precise $INC /tmp/$v.c -o /tmp/$v $LIBS
           done
       - name: Run same-run diagnostic
@@ -82,9 +75,12 @@ PY
         shell: bash
         run: |
           set +e
-          MKLROOT=/opt/intel/oneapi/mkl/latest; export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:$MKLROOT/lib:${LD_LIBRARY_PATH:-}"
-          echo X23; stdbuf -oL -eL /tmp/x23 2>&1 | tee /tmp/x27ceil-x23.txt
-          echo X27_INVALID_SPEED_CEILING; stdbuf -oL -eL /tmp/x27 2>&1 | tee /tmp/x27ceil-x27.txt
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:$MKLROOT/lib:${LD_LIBRARY_PATH:-}"
+          echo X23
+          stdbuf -oL -eL /tmp/x23 2>&1 | tee /tmp/x27ceil-x23.txt
+          echo X27_INVALID_SPEED_CEILING
+          stdbuf -oL -eL /tmp/x27 2>&1 | tee /tmp/x27ceil-x27.txt
           exit 0
       - name: Upload logs
         if: always() && steps.cpu.outputs.eligible == '1'
