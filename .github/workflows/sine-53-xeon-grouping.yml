@@ -6,6 +6,7 @@ on:
     branches: [ sine53-xeon-tuned-v2 ]
     paths:
       - 'make_sine_53_grouping_experiment.py'
+      - 'inject_sine53_unique9600.py'
       - '.github/workflows/sine-53-xeon-grouping.yml'
 
 jobs:
@@ -57,6 +58,8 @@ jobs:
           python3 make_sine_53_xeon_v12_batch.py
           cp bench_sine_53_xeon_v12_build.c bench_sine_53_v12_baseline_build.c
           python3 make_sine_53_grouping_experiment.py
+          python3 inject_sine53_unique9600.py bench_sine_53_v12_baseline_build.c
+          python3 inject_sine53_unique9600.py bench_sine_53_grouping_build.c
           MKLROOT=/opt/intel/oneapi/mkl/latest; CC=/opt/intel/oneapi/compiler/latest/bin/icx
           INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
           LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
