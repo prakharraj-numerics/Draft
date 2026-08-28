@@ -104,3 +104,5 @@ jobs:
           name: sine53-x23-boundary-${{ matrix.slot }}
           path: /tmp/x23b-*.txt
           if-no-files-found: ignore
+
+# boundary sweep: B10 B11 B12 B13 B14
