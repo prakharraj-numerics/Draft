@@ -31,16 +31,18 @@ static int xeon_anchor_init(void)
 OVEC static inline __m512d xeon_ct_i32(__m512d yh,__m512d yl,__mmask8 signmask)
 {
     const __m512d VK=_mm512_set1_pd(KGRID),VIK=_mm512_set1_pd(INVK),Z=_mm512_setzero_pd();
-    const __m512d ONE=_mm512_set1_pd(1.0),MH=_mm512_set1_pd(-0.5),C24=_mm512_set1_pd(1.0/24.0);
-    const __m512d MSIX=_mm512_set1_pd(-1.0/6.0),C120=_mm512_set1_pd(1.0/120.0);
+    const __m512d ONE=_mm512_set1_pd(1.0),MH=_mm512_set1_pd(-0.5),C24=_mm512_set1_pd(1.0/24.0),MC720=_mm512_set1_pd(-1.0/720.0);
+    const __m512d MSIX=_mm512_set1_pd(-1.0/6.0),C120=_mm512_set1_pd(1.0/120.0),MT5040=_mm512_set1_pd(-1.0/5040.0);
     __m512d ya=_mm512_add_pd(yh,yl);
     __m512d jd=_mm512_roundscale_pd(_mm512_mul_pd(ya,VK),_MM_FROUND_TO_NEAREST_INT|_MM_FROUND_NO_EXC);
     __m256i ji=_mm512_cvttpd_epi32(jd);
     __m512d d=_mm512_fnmadd_pd(jd,VIK,yh);
     d=_mm512_add_pd(d,yl);
     __m512d z=_mm512_mul_pd(d,d);
-    __m512d C=_mm512_fmadd_pd(z,_mm512_fmadd_pd(z,C24,MH),ONE);
-    __m512d T=_mm512_fmadd_pd(z,_mm512_fmadd_pd(z,C120,MSIX),ONE);
+    /* Same secant-spine C=cos(d), T=sin(d)/d realization; one additional
+       z term repairs the 2-ULP tail seen in the first two-gather experiment. */
+    __m512d C=_mm512_fmadd_pd(z,_mm512_fmadd_pd(z,_mm512_fmadd_pd(z,MC720,C24),MH),ONE);
+    __m512d T=_mm512_fmadd_pd(z,_mm512_fmadd_pd(z,_mm512_fmadd_pd(z,MT5040,C120),MSIX),ONE);
     __m512d sa=_mm512_i32gather_pd(ji,xeon_asin,8);
     __m512d ca=_mm512_i32gather_pd(ji,xeon_acos,8);
     __m512d dt=_mm512_mul_pd(d,T);
@@ -135,4 +137,4 @@ src=src.replace('_v8', '_x1')
 src=src.replace('cosine_style_pi4_octant_guarded_x1_compensated_cw','cosine_style_pi4_octant_guarded_xeon2g_compensated_cw')
 src=src.replace('AVX512_pi4_octant_int32_compensated_cw','AVX512_pi4_octant_int32_compensated_cw_2anchor_gather')
 Path('bench_sine_53_xeon_v1_build.c').write_text(src)
-print('S53X1_BUILD_PASS two_anchor_gathers=1 octant_bitlogic=1 v8_compensated_cw=1 rare_table_DD_boundary=1 formula=unchanged_secant_spine_CT')
+print('S53X1_BUILD_PASS two_anchor_gathers=1 ct_z3=1 octant_bitlogic=1 v8_compensated_cw=1 rare_table_DD_boundary=1 formula=unchanged_secant_spine_CT')
