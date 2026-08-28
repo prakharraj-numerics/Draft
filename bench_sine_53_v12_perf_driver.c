@@ -1,6 +1,4 @@
-#define main s53x12_original_main
 #include "bench_sine_53_xeon_v12_build.c"
-#undef main
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,7 +28,6 @@ int main(int argc,char **argv)
     if(!x||!y){free(y);free(x);kernel_destroy(k);redtab2_clear();return 4;}
     for(int i=0;i<PROFILE_N;i++) x[i]=base[i%CASES];
 
-    /* Warm the exact path that will be profiled. */
     if(!strcmp(argv[1],"ours")) {
         for(int r=0;r<200;r++) octant_eval_v8(k,x,y,PROFILE_N);
     } else {
