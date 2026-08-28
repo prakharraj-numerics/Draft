@@ -1,6 +1,6 @@
-#include <mpfr.h>
 #define S53F3_NO_MAIN 1
 #include "bench_sine_53_wide_fast3.c"
+#include <mpfr.h>
 
 /* Replace fused-Mode5 c0/c1 storage by the actual cached anchor quantities
    required by the unfused identity: sin(a), cos(a).  In a production library
@@ -34,7 +34,7 @@ int main(void)
     printf("S53F4_VECTOR_SCALAR bit_identical=%d/150\n",same);if(same!=CASES){kernel_destroy(base);free(f4_anchor);return 4;}
     if(!f3_verify("requested150",&view,x,CASES)){kernel_destroy(base);free(f4_anchor);return 5;}
     f3_bands(&view,x);
-    double*st=al64(STRESS*sizeof(double));if(st){make_stress(st);int ok=f3_verify("adversarial_stress",&view,st,STRESS);printf("S53F4_STRESS pass=%d contractual=0\n",ok);free(st);}
+    double*st=al64(STRESS*sizeof(double));if(st){make_stress(st);int ok=f3_verify("adversarial_stress",&view,st,STRESS);printf("S53F4_STRESS pass=%d contractual=0\n",ok);free(st);if(!ok){kernel_destroy(base);free(f4_anchor);return 6;}}
     int rc=f3_bench(&view,x);
     kernel_destroy(base);free(f4_anchor);flint_cleanup_master();return rc;
 }
