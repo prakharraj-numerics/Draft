@@ -111,7 +111,7 @@ jobs:
             printf 'kmov=' | tee -a /tmp/hwforensics/forensics.txt; grep -Eic '\bkmov' /tmp/hwforensics/${v}.objdump | tee -a /tmp/hwforensics/forensics.txt
             printf 'stack_mem_refs=' | tee -a /tmp/hwforensics/forensics.txt; grep -Eic '\[(r|e)sp[+\-]' /tmp/hwforensics/${v}.objdump | tee -a /tmp/hwforensics/forensics.txt
             echo '-- octant symbols --' | tee -a /tmp/hwforensics/forensics.txt
-            grep -E 'octant_vector|x12_prepare' /tmp/hwforensics/${v}.nm | tee -a /tmp/hwforensics/forensics.txt | head -30
+            grep -E 'octant_vector|x12_prepare' /tmp/hwforensics/${v}.nm | head -30 | tee -a /tmp/hwforensics/forensics.txt
             echo '-- gather neighborhoods --' | tee -a /tmp/hwforensics/forensics.txt
             grep -n -B5 -A8 -E 'vgather(d|q)?pd' /tmp/hwforensics/${v}.objdump | head -180 | tee -a /tmp/hwforensics/forensics.txt
           done
@@ -123,22 +123,7 @@ jobs:
           echo "LLVM_MCA=$MCA" | tee -a /tmp/hwforensics/forensics.txt
           if [ -n "$MCA" ]; then
             for v in x36 x37 x38 x39; do
-              python3 - "$v" <<'PY'
-import sys,re
-v=sys.argv[1]
-s=open(f'/tmp/hwforensics/{v}.s').read().splitlines()
-# Extract the first concrete octant_vector_v8 body if it exists.
-start=None
-for i,l in enumerate(s):
-    if re.match(r'^octant_vector_v8:',l.strip()): start=i; break
-if start is None:
-    open(f'/tmp/hwforensics/{v}.hot.s','w').write('')
-    raise SystemExit
-end=len(s)
-for j in range(start+1,len(s)):
-    if '.Lfunc_end' in s[j]: end=j+1; break
-open(f'/tmp/hwforensics/{v}.hot.s','w').write('\n'.join(s[start:end])+'\n')
-PY
+              python3 -c 'import sys,re; v=sys.argv[1]; s=open(f"/tmp/hwforensics/{v}.s").read().splitlines(); starts=[i for i,l in enumerate(s) if re.match(r"^octant_vector_v8:",l.strip())]; start=starts[0] if starts else None; end=(next((j+1 for j in range(start+1,len(s)) if ".Lfunc_end" in s[j]),len(s)) if start is not None else 0); open(f"/tmp/hwforensics/{v}.hot.s","w").write(("\n".join(s[start:end])+"\n") if start is not None else "")' "$v"
               if [ -s /tmp/hwforensics/${v}.hot.s ]; then
                 "$MCA" -mcpu=native -iterations=100 /tmp/hwforensics/${v}.hot.s > /tmp/hwforensics/${v}.mca 2>&1 || true
                 echo "=== $v llvm-mca ===" | tee -a /tmp/hwforensics/forensics.txt
