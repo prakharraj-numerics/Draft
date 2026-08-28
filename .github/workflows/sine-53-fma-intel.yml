@@ -86,8 +86,14 @@ jobs:
             -L"${MKLROOT}/lib" -Wl,-rpath,"${MKLROOT}/lib" -Wl,--no-as-needed \
             -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl \
             -o /tmp/sine53-fma
-          stdbuf -oL -eL /tmp/sine53-fma 2>&1 | tee /tmp/sine53-fma.txt
-          grep -E '^(S53_DOMAIN|S53_VERIFY|S53_PROFILE|S53_WINNER|S53_VECTOR_CHECK|S53_SKIP_TIMING|S53_TRIAL|S53_RESULT) ' /tmp/sine53-fma.txt
+          {
+            echo 'S53_CPU_BEGIN'
+            lscpu | grep -E 'Architecture|Vendor ID|Model name|CPU\(s\)'
+            grep -m1 '^flags' /proc/cpuinfo
+            echo 'S53_CPU_END'
+            stdbuf -oL -eL /tmp/sine53-fma
+          } 2>&1 | tee /tmp/sine53-fma.txt
+          grep -E '^(S53_CPU_BEGIN|S53_CPU_END|S53_DOMAIN|S53_VERIFY|S53_PROFILE|S53_WINNER|S53_VECTOR_CHECK|S53_SKIP_TIMING|S53_TRIAL|S53_RESULT) ' /tmp/sine53-fma.txt || true
 
       - name: Upload trace
         if: always()
@@ -96,5 +102,3 @@ jobs:
           name: sine-53-fma-intel-slot-${{ matrix.slot }}
           path: /tmp/sine53-fma.txt
           if-no-files-found: warn
-
-# public-run trigger 2026-08-28
