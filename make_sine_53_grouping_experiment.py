@@ -2,9 +2,9 @@ from pathlib import Path
 import runpy
 
 # Experimental gather-reduction via per-tile anchor bucketing. This preserves
-# the same v12 reducer, same Mode-5 coefficient bits, same anchor rule j,
-# same local delta d and same 5-FMA Horner order. Only Phase-2 data scheduling
-# changes. Designed as a diagnostic, not a production claim.
+# the same v12 reducer, same Mode-5 coefficient bits, same nearest-even anchor
+# rule j, same local delta d and same 5-FMA Horner order. Only Phase-2 data
+# scheduling changes. Designed as a diagnostic, not a production claim.
 runpy.run_path('make_sine_53_xeon_v12_batch.py', run_name='__main__')
 src=Path('bench_sine_53_xeon_v12_build.c').read_text()
 
@@ -29,7 +29,9 @@ repl=r'''        /* Phase 2 grouping diagnostic: same j,d and coefficient bits,
                 size_t b=idx>>3,lane=idx&7;
                 double rh=rhbuf[idx],rl=rlbuf[idx];
                 double ya=unitbuf[b]?rh:(rh+rl);
-                long j=lround(ya*KGRID);if(j<0)j=0;if(j>=(long)LUTN)j=(long)LUTN-1;
+                /* Match _MM_FROUND_TO_NEAREST_INT: nearest, ties-to-even under
+                   the default IEEE rounding mode. Never use lround here. */
+                long j=(long)nearbyint(ya*KGRID);if(j<0)j=0;if(j>=(long)LUTN)j=(long)LUTN-1;
                 double d=unitbuf[b]?fma(-(double)j,INVK,rh):((rh-(double)j*INVK)+rl);
                 dscalar[idx]=d;sscalar[idx]=(unsigned char)((signbuf[b]>>lane)&1u);
                 next[idx]=head[j];head[j]=(int)idx;
@@ -49,4 +51,4 @@ repl=r'''        /* Phase 2 grouping diagnostic: same j,d and coefficient bits,
 src=src.replace(marker,repl)
 src=src.replace('S53X12_','S53GRP_').replace('xeon_v12_tiled_two_stage_batch','xeon_v12_anchor_group_scalar_coeff_loads')
 Path('bench_sine_53_grouping_build.c').write_text(src)
-print('S53GRP_BUILD_PASS same_secant_Mode5_spine=1 same_coeff_bits=1 same_anchor_rule=1 same_delta_formula=1 same_Horner_FMA_order=1 gather_eliminated=1 anchor_bucket_tile=256 diagnostic_only=1')
+print('S53GRP_BUILD_PASS same_secant_Mode5_spine=1 same_coeff_bits=1 same_anchor_rule_nearest_even=1 same_delta_formula=1 same_Horner_FMA_order=1 gather_eliminated=1 anchor_bucket_tile=256 diagnostic_only=1')
