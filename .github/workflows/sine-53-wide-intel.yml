@@ -8,6 +8,7 @@ on:
       - '.github/workflows/sine-53-wide-intel.yml'
       - 'bench_sine_53_wide_intel.c'
       - 'bench_sine_53_wide150_driver.c'
+      - 'bench_sine_53_wide_dd_driver.c'
       - 'sine_53_coeff_source.c'
 
 permissions:
@@ -86,14 +87,14 @@ jobs:
           sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 6435UL/' sine_53_coeff_source.c
           grep '#define SF_LUT_N' sine_53_coeff_source.c
 
-      - name: Build and run requested wide 150-case benchmark
+      - name: Build and run guarded wide 150-case benchmark
         run: |
           set -euo pipefail
           MKLROOT=/opt/intel/oneapi/mkl/latest
           export LD_LIBRARY_PATH="${FLINT_PREFIX}/lib:${MKLROOT}/lib:${LD_LIBRARY_PATH:-}"
           gcc -O3 -march=native -DNDEBUG \
             -I"${FLINT_PREFIX}/include" -I"${MKLROOT}/include" -I. \
-            bench_sine_53_wide150_driver.c \
+            bench_sine_53_wide_dd_driver.c \
             -L"${FLINT_PREFIX}/lib" -Wl,-rpath,"${FLINT_PREFIX}/lib" -lflint -lmpfr -lgmp \
             -L"${MKLROOT}/lib" -Wl,-rpath,"${MKLROOT}/lib" -Wl,--no-as-needed \
             -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl \
