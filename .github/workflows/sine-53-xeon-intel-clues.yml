@@ -6,6 +6,7 @@ on:
     branches: [ sine53-xeon-tuned-v2 ]
     paths:
       - 'make_sine_53_xeon_intel_clues.py'
+      - 'make_sine_53_xeon_x35_pow2.py'
       - '.github/workflows/sine-53-xeon-intel-clues.yml'
 
 env:
@@ -68,7 +69,7 @@ jobs:
           cp bench_sine_53_xeon_x23_h14_build.c /tmp/x23.c
           python3 make_sine_53_xeon_intel_clues.py tiny
           cp bench_sine_53_xeon_x34_tiny_build.c /tmp/x34.c
-          python3 make_sine_53_xeon_intel_clues.py pow2
+          python3 make_sine_53_xeon_x35_pow2.py
           cp bench_sine_53_xeon_x35_pow2_build.c /tmp/x35.c
           python3 make_sine_53_xeon_intel_clues.py partial
           cp bench_sine_53_xeon_x36_partial_build.c /tmp/x36.c
