@@ -96,3 +96,5 @@ jobs:
           name: sine-53-fma-intel-slot-${{ matrix.slot }}
           path: /tmp/sine53-fma.txt
           if-no-files-found: warn
+
+# public-run trigger 2026-08-28
