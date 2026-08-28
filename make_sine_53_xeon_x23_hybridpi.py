@@ -1,9 +1,14 @@
 from pathlib import Path
 import runpy,sys
 
-if len(sys.argv)!=2 or sys.argv[1] not in ('20','16','12'):
-    raise SystemExit('usage: make_sine_53_xeon_x23_hybridpi.py {20|16|12}')
-B=int(sys.argv[1])
+if len(sys.argv)!=2:
+    raise SystemExit('usage: make_sine_53_xeon_x23_hybridpi.py threshold_bits')
+try:
+    B=int(sys.argv[1])
+except ValueError:
+    raise SystemExit('threshold_bits must be an integer')
+if not (6 <= B <= 30):
+    raise SystemExit('threshold_bits must be in 6..30')
 # Build the fast nearest-pi 2-piece/FMA reducer, then repair only lanes whose
 # reduced residual is close enough to zero that the last pi bits can affect
 # binary64 sine in ULPs. The repair uses the already-certified 3-piece split.
