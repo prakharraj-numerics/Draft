@@ -8,6 +8,7 @@ on:
       - 'make_sine_53_xeon_x20_fused_batch.py'
       - '.github/workflows/sine-53-xeon-x20-fused-batch.yml'
 
+# x20 trigger after workflow registration
 jobs:
   benchmark:
     strategy:
