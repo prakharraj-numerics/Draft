@@ -4,7 +4,27 @@ src = Path('bench_sine_53_wide_octant_v2.c').read_text()
 
 start = src.index('OVEC static void octant_vector_v2')
 end = src.index('\n#endif', start)
-new_vec = r'''OVEC static void octant_vector_v2(const s53w_kernel *k,const double *x,
+new_vec = r'''OVEC static inline __m512d mode5_poly_dd_i32(const s53w_kernel *k,
+                                             __m512d yh,__m512d yl,
+                                             __mmask8 signmask)
+{
+    const __m512d VK=_mm512_set1_pd(KGRID),VIK=_mm512_set1_pd(INVK),Z=_mm512_setzero_pd();
+    __m512d jd=_mm512_roundscale_pd(_mm512_mul_pd(yh,VK),
+                    _MM_FROUND_TO_NEAREST_INT|_MM_FROUND_NO_EXC);
+    __m256i ji=_mm512_cvttpd_epi32(jd);
+    __m512d d=_mm512_fnmadd_pd(jd,VIK,yh);
+    __m512d p=_mm512_i32gather_pd(ji,k->tab+(size_t)k->deg*LUTN,8),dp=Z;
+    for(int j=k->deg-1;j>=0;j--){
+        dp=_mm512_fmadd_pd(dp,d,p);
+        __m512d c=_mm512_i32gather_pd(ji,k->tab+(size_t)j*LUTN,8);
+        p=_mm512_fmadd_pd(p,d,c);
+    }
+    /* P(d+yl)=P(d)+yl*P'(d)+O(yl^2); yl is at the subtraction-roundoff scale. */
+    p=_mm512_fmadd_pd(yl,dp,p);
+    return _mm512_mask_sub_pd(p,signmask,Z,p);
+}
+
+OVEC static void octant_vector_v2(const s53w_kernel *k,const double *x,
                                   double *out,size_t n)
 {
     const __m512d Z=_mm512_setzero_pd(),ONE=_mm512_set1_pd(1.0);
@@ -23,6 +43,7 @@ new_vec = r'''OVEC static void octant_vector_v2(const s53w_kernel *k,const doubl
         __m512d ax=_mm512_castsi512_pd(_mm512_and_epi64(_mm512_castpd_si512(vx),ABSM));
         __mmask8 unit=(__mmask8)(_mm512_cmp_pd_mask(ax,ONE,_CMP_LT_OQ)&active);
 
+        /* Keep the established unit-domain champion literally untouched. */
         if(unit==active){
             __m512d p=mode5_poly_i32(k,ax,inneg);
             _mm512_mask_storeu_pd(out+i,active,p);
@@ -34,9 +55,6 @@ new_vec = r'''OVEC static void octant_vector_v2(const s53w_kernel *k,const doubl
         __m256i ki=_mm512_cvttpd_epi32(qf);
         __m512d kd=_mm512_cvtepi32_pd(ki);
 
-        /* Detect possible quotient/boundary ambiguity from the fractional
-           coordinate itself.  At |x|<=10000 its rounding error is far below
-           the 2^-32-radian guard converted to pi/4 units. */
         __m512d frac=_mm512_sub_pd(qf,kd);
         __mmask8 near0=_mm512_cmp_pd_mask(frac,VFT,_CMP_LT_OQ);
         __mmask8 near1=_mm512_cmp_pd_mask(frac,V1MFT,_CMP_GT_OQ);
@@ -51,26 +69,41 @@ new_vec = r'''OVEC static void octant_vector_v2(const s53w_kernel *k,const doubl
         __mmask8 rev=(__mmask8)((m2|m3|m6|m7)&wide);
         __mmask8 wide_neg=(__mmask8)((m4|m5|m6|m7)&wide);
 
-        /* Key cosine-derived improvement: do NOT form w and then subtract it
-           from pi/4 or pi/2.  Select the appropriate multiple m*pi/4 and form
-           the final folded angle directly. */
         __m512d md=kd;
         md=_mm512_mask_add_pd(md,am1,md,VM1);
         md=_mm512_mask_add_pd(md,ap2,md,VP2);
         md=_mm512_mask_add_pd(md,ap1,md,VP1);
 
-        __m512d yp=_mm512_fnmadd_pd(md,VP4H,ax);
-        yp=_mm512_fnmadd_pd(md,VP4L,yp);          /* ax - m*pi/4 */
-        __m512d yn=_mm512_fmadd_pd(md,VP4H,_mm512_sub_pd(Z,ax));
-        yn=_mm512_fmadd_pd(md,VP4L,yn);           /* m*pi/4 - ax */
-        __m512d y=_mm512_mask_mov_pd(yp,rev,yn);
-        y=_mm512_mask_mov_pd(y,unit,ax);
+        /* Direct folded-angle DD residual, no q*pi table gathers.
+           ph+pe is the exact product md*PIO4_HI (TwoProduct via FMA).
+           pl supplies the split-low piece. TwoSum/TwoDiff preserve the final
+           subtraction roundoff as yl, which is then consumed by P'(d). */
+        __m512d ph=_mm512_mul_pd(md,VP4H);
+        __m512d pe=_mm512_fmadd_pd(md,VP4H,_mm512_sub_pd(Z,ph));
+        __m512d pl=_mm512_mul_pd(md,VP4L);
 
-        /* Guarded lanes are overwritten by the DD fallback below. */
-        y=_mm512_mask_mov_pd(y,guarded,Z);
+        __m512d bhp,blp,bhn,bln;
+        twos2v(ax,_mm512_sub_pd(Z,ph),&bhp,&blp);       /* ax-ph */
+        twos2v(ph,_mm512_sub_pd(Z,ax),&bhn,&bln);       /* ph-ax */
+        __m512d ep=_mm512_sub_pd(Z,_mm512_add_pd(pe,pl));
+        __m512d en=_mm512_add_pd(pe,pl);
+        __m512d yhp,e2p,yhn,e2n;
+        twos2v(bhp,ep,&yhp,&e2p);
+        twos2v(bhn,en,&yhn,&e2n);
+        __m512d ylp=_mm512_add_pd(blp,e2p);
+        __m512d yln=_mm512_add_pd(bln,e2n);
+
+        __m512d yh=_mm512_mask_mov_pd(yhp,rev,yhn);
+        __m512d yl=_mm512_mask_mov_pd(ylp,rev,yln);
+        yh=_mm512_mask_mov_pd(yh,unit,ax);
+        yl=_mm512_mask_mov_pd(yl,unit,Z);
+
+        /* Boundary lanes are recomputed with the older full table-DD reducer. */
+        yh=_mm512_mask_mov_pd(yh,guarded,Z);
+        yl=_mm512_mask_mov_pd(yl,guarded,Z);
 
         __mmask8 signmask=(__mmask8)(((wide_neg^inneg)&wide)|(inneg&unit));
-        __m512d p=mode5_poly_i32(k,y,signmask);
+        __m512d p=mode5_poly_dd_i32(k,yh,yl,signmask);
         _mm512_mask_storeu_pd(out+i,active,p);
 
         if(__builtin_expect(guarded!=0,0)){
@@ -96,8 +129,7 @@ new_guard = r'''static int guard_count_v2(const double *x,int n)
 }'''
 src = src[:gs] + new_guard + src[ge:]
 
-# On a <=1 ULP verification failure, expose whether the already-proven DD
-# fallback would repair that exact lane and show its octant/fold geometry.
+# Keep failure diagnostics until all three accuracy gates pass on AVX-512.
 needle = 'uq++;uint64_t uo=ulpd(o[i],a),ui=ulpd(in[i],a);if(!uo)oe++;if(uo<=1)o1++;if(uo>om)om=uo;if(!ui)ie++;if(ui<=1)i1++;if(ui>im)im=ui;'
 repl = r'''uq++;uint64_t uo=ulpd(o[i],a),ui=ulpd(in[i],a);
         if(uo>1){
@@ -122,7 +154,7 @@ src = src.replace('S53O2_', 'S53O3_')
 src = src.replace('octant_v2', 'octant_v3')
 src = src.replace('_v2', '_v3')
 src = src.replace('guarded_v2', 'guarded_v3')
-src = src.replace('cosine_style_pi4_octant_guarded_v2', 'cosine_style_pi4_octant_guarded_v3_direct_multiple')
-src = src.replace('AVX512_pi4_octant_int32_split', 'AVX512_pi4_octant_direct_multiple_int32_split')
+src = src.replace('cosine_style_pi4_octant_guarded_v2', 'cosine_style_pi4_octant_guarded_v3_direct_multiple_ddlow')
+src = src.replace('AVX512_pi4_octant_int32_split', 'AVX512_pi4_octant_direct_multiple_DDlow_int32')
 Path('bench_sine_53_wide_octant_v3_build.c').write_text(src)
-print('S53O3_BUILD_PASS direct_multiple_fold=1 rare_dd_boundary=1 unit_direct=1 miss_diag=1')
+print('S53O3_BUILD_PASS direct_multiple_fold=1 dd_low_residual=1 derivative_correction=1 rare_dd_boundary=1 unit_direct=1 miss_diag=1')
