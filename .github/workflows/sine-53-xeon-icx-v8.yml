@@ -104,10 +104,14 @@ jobs:
           sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
           python3 make_sine_53_octant_v8.py
 
-          COMMON="-DNDEBUG -I${FLINT_PREFIX}/include -I${MKLROOT}/include -I. -L${FLINT_PREFIX}/lib -Wl,-rpath,${FLINT_PREFIX}/lib -lflint -lmpfr -lgmp -L${MKLROOT}/lib -Wl,-rpath,${MKLROOT}/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
+          INC="-DNDEBUG -I${FLINT_PREFIX}/include -I${MKLROOT}/include -I."
+          LIBS="-L${FLINT_PREFIX}/lib -Wl,-rpath,${FLINT_PREFIX}/lib -lflint -lmpfr -lgmp -L${MKLROOT}/lib -Wl,-rpath,${MKLROOT}/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
+          SRC=bench_sine_53_wide_octant_v8_build.c
 
-          gcc -O3 -march=native $COMMON bench_sine_53_wide_octant_v8_build.c -o /tmp/s53-v8-gcc
-          "$ICX" -O3 -xHost -fp-model=precise -fma -qopt-zmm-usage=high -qopt-for-throughput=single-job $COMMON bench_sine_53_wide_octant_v8_build.c -o /tmp/s53-v8-icx
+          # Source/object must precede libraries. Keep the exact numerical source identical.
+          gcc -O3 -march=native $INC "$SRC" -o /tmp/s53-v8-gcc $LIBS
+          "$ICX" -O3 -xHost -fp-model=precise $INC "$SRC" -o /tmp/s53-v8-icx-base $LIBS
+          "$ICX" -O3 -xHost -fp-model=precise -qopt-zmm-usage=high -qopt-multiple-gather-scatter-by-shuffles $INC "$SRC" -o /tmp/s53-v8-icx-tuned $LIBS
 
           "$ICX" --version | head -3
           gcc --version | head -1
@@ -125,9 +129,12 @@ jobs:
             echo S53ICX_GCC_BEGIN
             stdbuf -oL -eL /tmp/s53-v8-gcc
             echo S53ICX_GCC_END
-            echo S53ICX_ICX_BEGIN
-            stdbuf -oL -eL /tmp/s53-v8-icx
-            echo S53ICX_ICX_END
+            echo S53ICX_BASE_BEGIN
+            stdbuf -oL -eL /tmp/s53-v8-icx-base
+            echo S53ICX_BASE_END
+            echo S53ICX_TUNED_BEGIN
+            stdbuf -oL -eL /tmp/s53-v8-icx-tuned
+            echo S53ICX_TUNED_END
           } 2>&1 | tee /tmp/s53-icx-v8.txt
 
       - name: Upload trace
