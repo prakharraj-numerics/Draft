@@ -6,6 +6,7 @@ on:
     branches: [ sine53-xeon-tuned-v2 ]
     paths:
       - 'make_sine_53_xeon_opt_campaign.py'
+      - 'inject_sine53_unique9600.py'
       - '.github/workflows/sine-53-xeon-opt-campaign.yml'
 
 jobs:
@@ -77,6 +78,9 @@ jobs:
           python3 make_sine_53_xeon_v12_batch.py
           cp bench_sine_53_xeon_v12_build.c bench_sine_53_v12_baseline_build.c
           python3 make_sine_53_xeon_opt_campaign.py
+          for v in v12_baseline qfloor interleave_x2 interleave_x3 interleave_x4; do
+            python3 inject_sine53_unique9600.py "bench_sine_53_${v}_build.c"
+          done
 
       - name: Compile all on same Xeon
         if: steps.cpu.outputs.eligible == '1'
