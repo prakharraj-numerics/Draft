@@ -1,0 +1,103 @@
+name: Sine 53-bit Guarded Pi4 Octant v3 vs Intel HA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/sine-53-wide-octant-v3.yml'
+      - 'make_sine_53_octant_v3.py'
+      - 'bench_sine_53_wide_octant_v2.c'
+      - 'bench_sine_53_wide_fast2.c'
+      - 'bench_sine_53_wide_intel.c'
+      - 'sine_53_coeff_source.c'
+
+permissions:
+  contents: read
+
+env:
+  FLINT_PREFIX: /home/runner/flint36
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Base dependencies and Intel repository
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential curl xz-utils libgmp-dev libmpfr-dev gpg-agent wget ca-certificates
+          wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg >/dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main' | sudo tee /etc/apt/sources.list.d/oneAPI.list >/dev/null
+          sudo apt-get update -qq
+      - name: Detect Intel version and CPU
+        id: det
+        run: |
+          VER="$(apt-cache policy intel-oneapi-mkl-devel | awk '/Candidate:/{print $2}')"
+          SIG="$({ lscpu | grep -E 'Vendor ID|Model name'; grep -m1 '^flags' /proc/cpuinfo; } | sha256sum | cut -c1-20)"
+          echo "mkl=$VER" >> "$GITHUB_OUTPUT"
+          echo "cpu=$SIG" >> "$GITHUB_OUTPUT"
+          echo "SLOT=${{ matrix.slot }}"
+          lscpu | grep -E 'Architecture|Vendor ID|Model name|CPU\(s\)'
+          grep -m1 '^flags' /proc/cpuinfo
+      - name: Restore Intel oneMKL first
+        id: mklcache
+        uses: actions/cache@v4
+        with:
+          path: /opt/intel/oneapi
+          key: intel-onemkl-ubuntu24-x86_64-${{ steps.det.outputs.mkl }}-v1
+      - name: Install Intel oneMKL first
+        if: steps.mklcache.outputs.cache-hit != 'true'
+        run: sudo apt-get install -y --no-install-recommends intel-oneapi-mkl-devel
+      - name: Confirm Intel oneMKL before benchmark dependencies
+        run: test -f /opt/intel/oneapi/mkl/latest/include/mkl.h
+      - name: Restore FLINT 3.6.0
+        id: flintcache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.FLINT_PREFIX }}
+          key: flint-3.6.0-ubuntu24-x86_64-native-${{ steps.det.outputs.cpu }}-v2
+      - name: Install FLINT 3.6.0
+        if: steps.flintcache.outputs.cache-hit != 'true'
+        run: |
+          curl -L --fail --retry 3 -o /tmp/flint.tar.xz https://github.com/flintlib/flint/releases/download/v3.6.0/flint-3.6.0.tar.xz
+          echo '134d39731a6dd926254625d646d85bf5990c68a3f2326cd54d2a6983e3e11dd8  /tmp/flint.tar.xz' | sha256sum -c -
+          tar -xf /tmp/flint.tar.xz -C /tmp
+          cd /tmp/flint-3.6.0
+          CFLAGS='-O3 -march=native -DNDEBUG' ./configure --prefix="${FLINT_PREFIX}"
+          make -j"$(nproc)" >/dev/null
+          make install >/dev/null
+      - name: Build and run direct-multiple pi4 octant benchmark
+        run: |
+          set -euo pipefail
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          export LD_LIBRARY_PATH="${FLINT_PREFIX}/lib:${MKLROOT}/lib:${LD_LIBRARY_PATH:-}"
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
+          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
+          python3 make_sine_53_octant_v3.py
+          gcc -O3 -march=native -DNDEBUG -I"${FLINT_PREFIX}/include" -I"${MKLROOT}/include" -I. bench_sine_53_wide_octant_v3_build.c \
+            -L"${FLINT_PREFIX}/lib" -Wl,-rpath,"${FLINT_PREFIX}/lib" -lflint -lmpfr -lgmp \
+            -L"${MKLROOT}/lib" -Wl,-rpath,"${MKLROOT}/lib" -Wl,--no-as-needed \
+            -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl -o /tmp/sine53-octant-v3
+          {
+            echo 'S53O3_CPU_BEGIN'
+            lscpu | grep -E 'Architecture|Vendor ID|Model name|CPU\(s\)'
+            grep -m1 '^flags' /proc/cpuinfo
+            echo 'S53O3_CPU_END'
+            stdbuf -oL -eL /tmp/sine53-octant-v3
+          } 2>&1 | tee /tmp/sine53-octant-v3.txt
+      - name: Upload trace
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sine-53-octant-v3-slot-${{ matrix.slot }}
+          path: /tmp/sine53-octant-v3.txt
+          if-no-files-found: warn
