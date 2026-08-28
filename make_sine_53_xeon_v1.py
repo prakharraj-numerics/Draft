@@ -61,7 +61,7 @@ new_vec = r'''OVEC static void octant_vector_v8(const s53w_kernel *k,const doubl
     const __m512d VC1=_mm512_set1_pd(PIO4_CW1),VC2=_mm512_set1_pd(PIO4_CW2),VC3=_mm512_set1_pd(PIO4_CW3);
     const __m512d VFT=_mm512_set1_pd(BOUND_TAU*FOUR_OVER_PI),V1MFT=_mm512_set1_pd(1.0-BOUND_TAU*FOUR_OVER_PI);
     const __m512i ABSM=_mm512_set1_epi64((long long)UINT64_C(0x7fffffffffffffff));
-    const __m256i I1=_mm256_set1_epi32(1),I2=_mm256_set1_epi32(2),I3=_mm256_set1_epi32(3),I4=_mm256_set1_epi32(4),I7=_mm256_set1_epi32(7),IZ=_mm256_setzero_si256();
+    const __m256i I1=_mm256_set1_epi32(1),I2=_mm256_set1_epi32(2),I3=_mm256_set1_epi32(3),I4=_mm256_set1_epi32(4),I7=_mm256_set1_epi32(7);
 
     for(size_t i=0;i<n;i+=8){
         unsigned rem=(unsigned)(n-i);
@@ -123,7 +123,7 @@ new_vec = r'''OVEC static void octant_vector_v8(const s53w_kernel *k,const doubl
 src = src[:start] + new_vec + src[end:]
 
 # Setup-only anchor creation before any verification/timing.
-needle='s53w_kernel*k=kernel_create(2);'
+needle='s53w_kernel *k=kernel_create(2);'
 if needle not in src:
     raise SystemExit('kernel-create marker not found')
 src=src.replace(needle,'if(!xeon_anchor_init())return 2;'+needle,1)
