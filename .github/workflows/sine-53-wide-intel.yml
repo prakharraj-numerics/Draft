@@ -7,8 +7,8 @@ on:
     paths:
       - '.github/workflows/sine-53-wide-intel.yml'
       - 'bench_sine_53_wide_intel.c'
-      - 'bench_sine_53_wide150_driver.c'
       - 'bench_sine_53_wide_dd_driver.c'
+      - 'bench_sine_53_wide_dd_debug.c'
       - 'sine_53_coeff_source.c'
 
 permissions:
@@ -27,7 +27,6 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
-
       - name: Base dependencies and Intel repository
         run: |
           sudo apt-get update -qq
@@ -35,7 +34,6 @@ jobs:
           wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg >/dev/null
           echo 'deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main' | sudo tee /etc/apt/sources.list.d/oneAPI.list >/dev/null
           sudo apt-get update -qq
-
       - name: Detect Intel version and CPU
         id: det
         run: |
@@ -46,30 +44,23 @@ jobs:
           echo "SLOT=${{ matrix.slot }}"
           lscpu | grep -E 'Architecture|Vendor ID|Model name|CPU\(s\)'
           grep -m1 '^flags' /proc/cpuinfo
-
       - name: Restore Intel oneMKL first
         id: mklcache
         uses: actions/cache@v4
         with:
           path: /opt/intel/oneapi
           key: intel-onemkl-ubuntu24-x86_64-${{ steps.det.outputs.mkl }}-v1
-
       - name: Install Intel oneMKL first
         if: steps.mklcache.outputs.cache-hit != 'true'
         run: sudo apt-get install -y --no-install-recommends intel-oneapi-mkl-devel
-
       - name: Confirm Intel oneMKL before benchmark dependencies
-        run: |
-          test -f /opt/intel/oneapi/mkl/latest/include/mkl.h
-          echo "MKL preinstalled at /opt/intel/oneapi/mkl/latest"
-
+        run: test -f /opt/intel/oneapi/mkl/latest/include/mkl.h
       - name: Restore FLINT 3.6.0
         id: flintcache
         uses: actions/cache@v4
         with:
           path: ${{ env.FLINT_PREFIX }}
           key: flint-3.6.0-ubuntu24-x86_64-native-${{ steps.det.outputs.cpu }}-v2
-
       - name: Install FLINT 3.6.0
         if: steps.flintcache.outputs.cache-hit != 'true'
         run: |
@@ -80,34 +71,15 @@ jobs:
           CFLAGS='-O3 -march=native -DNDEBUG' ./configure --prefix="${FLINT_PREFIX}"
           make -j"$(nproc)" >/dev/null
           make install >/dev/null
-
       - name: Extend Mode-5 LUT through pi over 2
-        run: |
-          grep '#define SF_LUT_N' sine_53_coeff_source.c
-          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 6435UL/' sine_53_coeff_source.c
-          grep '#define SF_LUT_N' sine_53_coeff_source.c
-
-      - name: Build and run guarded wide 150-case benchmark
+        run: sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 6435UL/' sine_53_coeff_source.c
+      - name: Build and run AVX scalar cross-check
         run: |
           set -euo pipefail
           MKLROOT=/opt/intel/oneapi/mkl/latest
           export LD_LIBRARY_PATH="${FLINT_PREFIX}/lib:${MKLROOT}/lib:${LD_LIBRARY_PATH:-}"
-          gcc -O3 -march=native -DNDEBUG \
-            -I"${FLINT_PREFIX}/include" -I"${MKLROOT}/include" -I. \
-            bench_sine_53_wide_dd_driver.c \
-            -L"${FLINT_PREFIX}/lib" -Wl,-rpath,"${FLINT_PREFIX}/lib" -lflint -lmpfr -lgmp \
-            -L"${MKLROOT}/lib" -Wl,-rpath,"${MKLROOT}/lib" -Wl,--no-as-needed \
-            -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl \
-            -o /tmp/sine53-wide
-          {
-            echo 'S53W_CPU_BEGIN'
-            lscpu | grep -E 'Architecture|Vendor ID|Model name|CPU\(s\)'
-            grep -m1 '^flags' /proc/cpuinfo
-            echo 'S53W_CPU_END'
-            stdbuf -oL -eL /tmp/sine53-wide
-          } 2>&1 | tee /tmp/sine53-wide.txt
-          grep -E '^(S53W_CPU_BEGIN|S53W_CPU_END|S53W_DOMAIN|S53W_VERIFY|S53W_PROFILE|S53W_WINNER|S53W_STRESS_DIAGNOSTIC|S53W_BAND|S53W_SKIP_TIMING|S53W_TRIAL|S53W_RESULT) ' /tmp/sine53-wide.txt || true
-
+          gcc -O3 -march=native -DNDEBUG -I"${FLINT_PREFIX}/include" -I"${MKLROOT}/include" -I. bench_sine_53_wide_dd_debug.c -L"${FLINT_PREFIX}/lib" -Wl,-rpath,"${FLINT_PREFIX}/lib" -lflint -lmpfr -lgmp -L"${MKLROOT}/lib" -Wl,-rpath,"${MKLROOT}/lib" -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl -o /tmp/sine53-debug
+          stdbuf -oL -eL /tmp/sine53-debug 2>&1 | tee /tmp/sine53-wide.txt
       - name: Upload trace
         if: always()
         uses: actions/upload-artifact@v4
