@@ -100,9 +100,19 @@ jobs:
           sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
           python3 make_sine_53_xeon_v12_batch.py
           cp bench_sine_53_xeon_v12_build.c /tmp/v12checksrc.c
-          sed -i 's/^int main(void){/int s53x12_original_main(void){/' bench_sine_53_xeon_v12_build.c
-          grep -q '^int s53x12_original_main(void)' bench_sine_53_xeon_v12_build.c
-          echo S53PROF3_MAIN_RENAME_PASS
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('bench_sine_53_xeon_v12_build.c')
+          s=p.read_text()
+          needle='int main(void)'
+          pos=s.rfind(needle)
+          if pos < 0:
+              raise SystemExit('generated v12 main not found')
+          s=s[:pos]+'int s53x12_original_main(void)'+s[pos+len(needle):]
+          p.write_text(s)
+          print('S53PROF3_MAIN_RENAME_PASS')
+          PY
+          grep -q 'int s53x12_original_main(void)' bench_sine_53_xeon_v12_build.c
 
       - name: Build certified check and profiler
         if: steps.det.outputs.eligible == '1'
