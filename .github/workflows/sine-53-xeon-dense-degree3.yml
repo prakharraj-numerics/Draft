@@ -6,6 +6,7 @@ on:
     branches: [ sine53-xeon-tuned-v2 ]
     paths:
       - 'make_sine_53_dense_degree3_transform.py'
+      - 'inject_sine53_unique9600.py'
       - '.github/workflows/sine-53-xeon-dense-degree3.yml'
 
 jobs:
@@ -58,7 +59,6 @@ jobs:
           prep_common () {
             sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
           }
-          # certified baseline K8 degree5
           cp /tmp/coeff.orig sine_53_coeff_source.c; cp /tmp/wide.orig bench_sine_53_wide_intel.c; cp /tmp/fast2.orig bench_sine_53_wide_fast2.c
           sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
           sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
@@ -67,8 +67,8 @@ jobs:
           prep_common
           python3 make_sine_53_xeon_v12_batch.py
           cp bench_sine_53_xeon_v12_build.c /tmp/base.c
+          python3 inject_sine53_unique9600.py /tmp/base.c
           "$CC" -O3 -xHost -fp-model=precise $INC /tmp/base.c -o /tmp/base $LIBS
-          # degree3 same Mode5 generator at progressively denser dyadic grids
           for spec in '9 512 805' '10 1024 1609' '11 2048 3218' '12 4096 6435'; do
             set -- $spec; K=$1; KG=$2; LN=$3
             cp /tmp/coeff.orig sine_53_coeff_source.c; cp /tmp/wide.orig bench_sine_53_wide_intel.c; cp /tmp/fast2.orig bench_sine_53_wide_fast2.c
@@ -80,6 +80,7 @@ jobs:
             python3 make_sine_53_xeon_v12_batch.py
             python3 make_sine_53_dense_degree3_transform.py
             cp bench_sine_53_xeon_v12_build.c "/tmp/d3k${K}.c"
+            python3 inject_sine53_unique9600.py "/tmp/d3k${K}.c"
             "$CC" -O3 -xHost -fp-model=precise $INC "/tmp/d3k${K}.c" -o "/tmp/d3k${K}" $LIBS
           done
       - name: Run baseline and dense degree3 variants
@@ -96,5 +97,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sine53-dense-d3-${{ matrix.slot }}
-          path: /tmp/*dense*.txt
+          path: |
+            /tmp/base_dense.txt
+            /tmp/d3k*.txt
           if-no-files-found: ignore
