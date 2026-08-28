@@ -1,6 +1,6 @@
-#define main s53f3_old_main
+#include <mpfr.h>
+#define S53F3_NO_MAIN 1
 #include "bench_sine_53_wide_fast3.c"
-#undef main
 
 /* Replace fused-Mode5 c0/c1 storage by the actual cached anchor quantities
    required by the unfused identity: sin(a), cos(a).  In a production library
@@ -14,7 +14,7 @@ static int f4_anchor_init(void)
     mpfr_t a,s,c;mpfr_init2(a,256);mpfr_init2(s,256);mpfr_init2(c,256);
     for(size_t i=0;i<LUTN;i++){
         mpfr_set_ui(a,(unsigned long)i,MPFR_RNDN);
-        mpfr_div_2ui(a,a,KEXP,MPFR_RNDN);
+        mpfr_div_2ui(a,a,SF_K,MPFR_RNDN);
         mpfr_sin_cos(s,c,a,MPFR_RNDN);
         f4_anchor[i]=mpfr_get_d(s,MPFR_RNDN);
         f4_anchor[LUTN+i]=mpfr_get_d(c,MPFR_RNDN);
