@@ -1,3 +1,4 @@
+# rerun allocation 3; benchmark code unchanged
 name: Sine 53-bit Xeon v15 cache-packed LUT
 
 on:
