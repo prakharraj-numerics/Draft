@@ -1,0 +1,173 @@
+name: Sine 53-bit v12 perf profile v3
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [sine53-xeon-tuned-v2]
+    paths:
+      - 'bench_sine_53_v12_perf_driver.c'
+      - '.github/workflows/sine-53-v12-perf-profile-v3.yml'
+
+permissions:
+  contents: read
+
+env:
+  FLINT_PREFIX: /home/runner/flint36
+
+jobs:
+  profile:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies and Intel repository
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential curl xz-utils libgmp-dev libmpfr-dev gpg-agent wget ca-certificates binutils linux-tools-common linux-tools-generic || true
+          wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg >/dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main' | sudo tee /etc/apt/sources.list.d/oneAPI.list >/dev/null
+          sudo apt-get update -qq
+
+      - name: Detect Intel or AMD AVX512
+        id: det
+        shell: bash
+        run: |
+          set -euo pipefail
+          lscpu | grep -E 'Architecture|Vendor ID|Model name|CPU\(s\)|MHz|L1d cache|L2 cache|L3 cache'
+          VENDOR="$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/,"",$2); print $2}')"
+          if grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f && { [ "$VENDOR" = GenuineIntel ] || [ "$VENDOR" = AuthenticAMD ]; }; then
+            echo eligible=1 >> "$GITHUB_OUTPUT"
+          else
+            echo eligible=0 >> "$GITHUB_OUTPUT"
+          fi
+          if [ "$VENDOR" = GenuineIntel ]; then echo vendor=intel >> "$GITHUB_OUTPUT"; else echo vendor=amd >> "$GITHUB_OUTPUT"; fi
+          SIG="$({ lscpu | grep -E 'Vendor ID|Model name'; grep -m1 '^flags' /proc/cpuinfo; } | sha256sum | cut -c1-20)"
+          echo "cpu=$SIG" >> "$GITHUB_OUTPUT"
+          echo "mkl=$(apt-cache policy intel-oneapi-mkl-devel | awk '/Candidate:/{print $2}')" >> "$GITHUB_OUTPUT"
+          echo "compiler=$(apt-cache policy intel-oneapi-compiler-dpcpp-cpp | awk '/Candidate:/{print $2}')" >> "$GITHUB_OUTPUT"
+
+      - name: Skip unsupported
+        if: steps.det.outputs.eligible != '1'
+        run: echo S53PROF3_SKIP
+
+      - name: Restore oneAPI
+        if: steps.det.outputs.eligible == '1'
+        id: oneapi
+        uses: actions/cache@v4
+        with:
+          path: /opt/intel/oneapi
+          key: intel-oneapi-prof3-${{ steps.det.outputs.vendor }}-${{ steps.det.outputs.mkl }}-${{ steps.det.outputs.compiler }}-v1
+
+      - name: Install oneAPI
+        if: steps.det.outputs.eligible == '1' && steps.oneapi.outputs.cache-hit != 'true'
+        run: |
+          if [ '${{ steps.det.outputs.vendor }}' = intel ]; then
+            sudo apt-get install -y --no-install-recommends intel-oneapi-mkl-devel intel-oneapi-compiler-dpcpp-cpp
+          else
+            sudo apt-get install -y --no-install-recommends intel-oneapi-mkl-devel
+          fi
+
+      - name: Restore FLINT
+        if: steps.det.outputs.eligible == '1'
+        id: flint
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.FLINT_PREFIX }}
+          key: flint-3.6.0-ubuntu24-x86_64-native-${{ steps.det.outputs.cpu }}-v2
+
+      - name: Install FLINT
+        if: steps.det.outputs.eligible == '1' && steps.flint.outputs.cache-hit != 'true'
+        run: |
+          curl -L --fail --retry 3 -o /tmp/flint.tar.xz https://github.com/flintlib/flint/releases/download/v3.6.0/flint-3.6.0.tar.xz
+          echo '134d39731a6dd926254625d646d85bf5990c68a3f2326cd54d2a6983e3e11dd8  /tmp/flint.tar.xz' | sha256sum -c -
+          tar -xf /tmp/flint.tar.xz -C /tmp; cd /tmp/flint-3.6.0
+          CFLAGS='-O3 -march=native -DNDEBUG' ./configure --prefix="$FLINT_PREFIX"
+          make -j"$(nproc)" >/dev/null; make install >/dev/null
+
+      - name: Generate exact certified v12
+        if: steps.det.outputs.eligible == '1'
+        run: |
+          set -euo pipefail
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
+          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
+          python3 make_sine_53_xeon_v12_batch.py
+          cp bench_sine_53_xeon_v12_build.c /tmp/v12checksrc.c
+          sed -i 's/^int main(void){/int s53x12_original_main(void){/' bench_sine_53_xeon_v12_build.c
+          grep -q '^int s53x12_original_main(void)' bench_sine_53_xeon_v12_build.c
+          echo S53PROF3_MAIN_RENAME_PASS
+
+      - name: Build certified check and profiler
+        if: steps.det.outputs.eligible == '1'
+        run: |
+          set -euo pipefail
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:$MKLROOT/lib:${LD_LIBRARY_PATH:-}"
+          INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
+          LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
+          if [ '${{ steps.det.outputs.vendor }}' = intel ]; then
+            CC=/opt/intel/oneapi/compiler/latest/bin/icx
+            "$CC" -O3 -xHost -fp-model=precise -g $INC /tmp/v12checksrc.c -o /tmp/v12check $LIBS
+            "$CC" -O3 -xHost -fp-model=precise -g -fno-omit-frame-pointer $INC bench_sine_53_v12_perf_driver.c -o /tmp/s53prof $LIBS
+          else
+            gcc -O3 -march=native -g $INC /tmp/v12checksrc.c -o /tmp/v12check $LIBS
+            gcc -O3 -march=native -g -fno-omit-frame-pointer $INC bench_sine_53_v12_perf_driver.c -o /tmp/s53prof $LIBS
+          fi
+          objdump -d -Mintel /tmp/s53prof > /tmp/s53prof-assembly.txt
+          nm -an /tmp/s53prof | grep -E 'octant|mode5|x12_prepare|scalar2|vmdSin' > /tmp/s53prof-symbols.txt || true
+
+      - name: Certification
+        if: steps.det.outputs.eligible == '1'
+        run: |
+          MKLROOT=/opt/intel/oneapi/mkl/latest; export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:$MKLROOT/lib:${LD_LIBRARY_PATH:-}"
+          stdbuf -oL -eL /tmp/v12check 2>&1 | tee /tmp/cert.txt
+
+      - name: Perf counters and sampling
+        if: steps.det.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set +e
+          MKLROOT=/opt/intel/oneapi/mkl/latest; export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:$MKLROOT/lib:${LD_LIBRARY_PATH:-}"
+          { perf --version; sysctl kernel.perf_event_paranoid; sudo sysctl -w kernel.perf_event_paranoid=-1; } > /tmp/perf-cap.txt 2>&1
+          EVENTS='cycles,instructions,branches,branch-misses,cache-references,cache-misses,L1-dcache-loads,L1-dcache-load-misses'
+          echo OURS > /tmp/perf-stat.txt
+          perf stat -r 5 -e "$EVENTS" -- /tmp/s53prof ours 30000 >> /tmp/perf-stat.txt 2>&1
+          echo INTEL >> /tmp/perf-stat.txt
+          perf stat -r 5 -e "$EVENTS" -- /tmp/s53prof intel 30000 >> /tmp/perf-stat.txt 2>&1
+          perf list 2>/dev/null | grep -Ei '512|avx|fp_arith|fp_ret|gather|stall' > /tmp/perf-events.txt || true
+          if perf list 2>/dev/null | grep -qi 'fp_arith_inst_retired.512b_packed_double'; then
+            perf stat -r 3 -e fp_arith_inst_retired.512b_packed_double -- /tmp/s53prof ours 30000 > /tmp/fp512-ours.txt 2>&1
+            perf stat -r 3 -e fp_arith_inst_retired.512b_packed_double -- /tmp/s53prof intel 30000 > /tmp/fp512-intel.txt 2>&1
+          fi
+          perf record -F 999 -g --call-graph fp -o /tmp/ours.data -- /tmp/s53prof ours 50000 >/tmp/record-ours.txt 2>&1
+          perf report --stdio --no-children --percent-limit 0.25 -i /tmp/ours.data > /tmp/report-ours.txt 2>&1
+          perf record -F 999 -g --call-graph fp -o /tmp/intel.data -- /tmp/s53prof intel 50000 >/tmp/record-intel.txt 2>&1
+          perf report --stdio --no-children --percent-limit 0.25 -i /tmp/intel.data > /tmp/report-intel.txt 2>&1
+          exit 0
+
+      - name: Upload profiling trace
+        if: always() && steps.det.outputs.eligible == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sine53-v12-prof3-${{ steps.det.outputs.vendor }}-${{ matrix.slot }}
+          path: |
+            /tmp/cert.txt
+            /tmp/perf-cap.txt
+            /tmp/perf-stat.txt
+            /tmp/perf-events.txt
+            /tmp/fp512-ours.txt
+            /tmp/fp512-intel.txt
+            /tmp/record-ours.txt
+            /tmp/record-intel.txt
+            /tmp/report-ours.txt
+            /tmp/report-intel.txt
+            /tmp/s53prof-assembly.txt
+            /tmp/s53prof-symbols.txt
+          if-no-files-found: ignore
