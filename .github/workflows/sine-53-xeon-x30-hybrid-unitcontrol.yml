@@ -1,0 +1,97 @@
+name: Sine 53-bit X30 aggregate unit-control hybrid
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ sine53-xeon-tuned-v2 ]
+    paths:
+      - 'make_sine_53_xeon_x30_hybrid_unitcontrol.py'
+      - '.github/workflows/sine-53-xeon-x30-hybrid-unitcontrol.yml'
+
+env:
+  FLINT_PREFIX: /home/runner/flint36
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect Xeon AVX512
+        id: cpu
+        shell: bash
+        run: |
+          VENDOR="$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/,"",$2); print $2}')"
+          lscpu | grep -E 'Vendor ID|Model name|CPU\(s\)|Thread\(s\) per core|Core\(s\) per socket|L1d cache|L2 cache|L3 cache'
+          if [ "$VENDOR" = GenuineIntel ] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f; then echo eligible=1 >> "$GITHUB_OUTPUT"; else echo eligible=0 >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/cache@v4
+        if: steps.cpu.outputs.eligible == '1'
+        with:
+          path: /opt/intel/oneapi
+          key: intel-oneapi-prof3-intel-2026.1.0-236-2026.1.1-325-v1
+      - name: Base packages
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \( -iname '*microsoft*' -o -iname '*azure*' \) -delete || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential libgmp-dev libmpfr-dev
+      - uses: actions/cache@v4
+        if: steps.cpu.outputs.eligible == '1'
+        with:
+          path: /home/runner/flint36
+          key: flint-3.6.0-ubuntu24-x86_64-native-cd49f6116fb977da331dbb6627f4998397730a62253bd7a70a201ad5a00576d7-v2
+      - name: Build X23 X29U X30
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
+          MKLROOT=/opt/intel/oneapi/mkl/latest; CC=/opt/intel/oneapi/compiler/latest/bin/icx
+          INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
+          LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
+          python3 make_sine_53_xeon_x23_hybridpi.py 14
+          cp bench_sine_53_xeon_x23_h14_build.c /tmp/x23.c
+          python3 make_sine_53_xeon_x29_vectorcontrol.py u
+          cp bench_sine_53_xeon_x29_u_build.c /tmp/x29u.c
+          python3 make_sine_53_xeon_x30_hybrid_unitcontrol.py
+          cp bench_sine_53_xeon_x30_build.c /tmp/x30.c
+          for v in x23 x29u x30; do
+            cp /tmp/${v}.c /tmp/${v}_acc.c
+            python3 inject_sine53_unique9600.py /tmp/${v}_acc.c
+            "$CC" -O3 -xHost -fp-model=precise $INC /tmp/${v}_acc.c -o /tmp/${v}_acc $LIBS
+            cp /tmp/${v}_acc.c /tmp/${v}_spd.c
+            python3 patch_sine53_x27_speed_ceiling.py /tmp/${v}_spd.c
+            "$CC" -O3 -xHost -fp-model=precise $INC /tmp/${v}_spd.c -o /tmp/${v}_spd $LIBS
+          done
+      - name: Run accuracy and same-run speed
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set +e
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:$MKLROOT/lib:${LD_LIBRARY_PATH:-}"
+          : > /tmp/x30-hybrid.txt
+          for v in x23 x29u x30; do
+            echo "=== ${v} ACCURACY ===" | tee -a /tmp/x30-hybrid.txt
+            stdbuf -oL -eL /tmp/${v}_acc 2>&1 | tee -a /tmp/x30-hybrid.txt
+            echo "ACC_RC_${v}=${PIPESTATUS[0]}" | tee -a /tmp/x30-hybrid.txt
+            echo "=== ${v} SPEED ===" | tee -a /tmp/x30-hybrid.txt
+            stdbuf -oL -eL /tmp/${v}_spd 2>&1 | tee -a /tmp/x30-hybrid.txt
+          done
+          exit 0
+      - name: Upload logs
+        if: always() && steps.cpu.outputs.eligible == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sine53-x30-hybrid-${{ matrix.slot }}
+          path: /tmp/x30-hybrid.txt
+          if-no-files-found: ignore
