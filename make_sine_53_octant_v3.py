@@ -12,15 +12,16 @@ new_vec = r'''OVEC static inline __m512d mode5_poly_dd_i32(const s53w_kernel *k,
     __m512d jd=_mm512_roundscale_pd(_mm512_mul_pd(yh,VK),
                     _MM_FROUND_TO_NEAREST_INT|_MM_FROUND_NO_EXC);
     __m256i ji=_mm512_cvttpd_epi32(jd);
+    /* The anchor is an exact dyadic j/256.  Move the reduction low word into
+       this tiny local coordinate before Horner; this resolves yl at the scale
+       where it matters without a second derivative polynomial. */
     __m512d d=_mm512_fnmadd_pd(jd,VIK,yh);
-    __m512d p=_mm512_i32gather_pd(ji,k->tab+(size_t)k->deg*LUTN,8),dp=Z;
+    d=_mm512_add_pd(d,yl);
+    __m512d p=_mm512_i32gather_pd(ji,k->tab+(size_t)k->deg*LUTN,8);
     for(int j=k->deg-1;j>=0;j--){
-        dp=_mm512_fmadd_pd(dp,d,p);
         __m512d c=_mm512_i32gather_pd(ji,k->tab+(size_t)j*LUTN,8);
         p=_mm512_fmadd_pd(p,d,c);
     }
-    /* P(d+yl)=P(d)+yl*P'(d)+O(yl^2); yl is at the subtraction-roundoff scale. */
-    p=_mm512_fmadd_pd(yl,dp,p);
     return _mm512_mask_sub_pd(p,signmask,Z,p);
 }
 
@@ -74,17 +75,15 @@ OVEC static void octant_vector_v2(const s53w_kernel *k,const double *x,
         md=_mm512_mask_add_pd(md,ap2,md,VP2);
         md=_mm512_mask_add_pd(md,ap1,md,VP1);
 
-        /* Direct folded-angle DD residual, no q*pi table gathers.
-           ph+pe is the exact product md*PIO4_HI (TwoProduct via FMA).
-           pl supplies the split-low piece. TwoSum/TwoDiff preserve the final
-           subtraction roundoff as yl, which is then consumed by P'(d). */
+        /* Direct folded-angle double-double residual, without q*pi table
+           gathers.  ph+pe is md*PIO4_HI, while pl is md*PIO4_LO. */
         __m512d ph=_mm512_mul_pd(md,VP4H);
         __m512d pe=_mm512_fmadd_pd(md,VP4H,_mm512_sub_pd(Z,ph));
         __m512d pl=_mm512_mul_pd(md,VP4L);
 
         __m512d bhp,blp,bhn,bln;
-        twos2v(ax,_mm512_sub_pd(Z,ph),&bhp,&blp);       /* ax-ph */
-        twos2v(ph,_mm512_sub_pd(Z,ax),&bhn,&bln);       /* ph-ax */
+        twos2v(ax,_mm512_sub_pd(Z,ph),&bhp,&blp);
+        twos2v(ph,_mm512_sub_pd(Z,ax),&bhn,&bln);
         __m512d ep=_mm512_sub_pd(Z,_mm512_add_pd(pe,pl));
         __m512d en=_mm512_add_pd(pe,pl);
         __m512d yhp,e2p,yhn,e2n;
@@ -98,7 +97,7 @@ OVEC static void octant_vector_v2(const s53w_kernel *k,const double *x,
         yh=_mm512_mask_mov_pd(yh,unit,ax);
         yl=_mm512_mask_mov_pd(yl,unit,Z);
 
-        /* Boundary lanes are recomputed with the older full table-DD reducer. */
+        /* Boundary lanes are recomputed by the older full table-DD reducer. */
         yh=_mm512_mask_mov_pd(yh,guarded,Z);
         yl=_mm512_mask_mov_pd(yl,guarded,Z);
 
@@ -154,7 +153,7 @@ src = src.replace('S53O2_', 'S53O3_')
 src = src.replace('octant_v2', 'octant_v3')
 src = src.replace('_v2', '_v3')
 src = src.replace('guarded_v2', 'guarded_v3')
-src = src.replace('cosine_style_pi4_octant_guarded_v2', 'cosine_style_pi4_octant_guarded_v3_direct_multiple_ddlow')
-src = src.replace('AVX512_pi4_octant_int32_split', 'AVX512_pi4_octant_direct_multiple_DDlow_int32')
+src = src.replace('cosine_style_pi4_octant_guarded_v2', 'cosine_style_pi4_octant_guarded_v3_direct_multiple_ddlocal')
+src = src.replace('AVX512_pi4_octant_int32_split', 'AVX512_pi4_octant_direct_multiple_DDlocal_int32')
 Path('bench_sine_53_wide_octant_v3_build.c').write_text(src)
-print('S53O3_BUILD_PASS direct_multiple_fold=1 dd_low_residual=1 derivative_correction=1 rare_dd_boundary=1 unit_direct=1 miss_diag=1')
+print('S53O3_BUILD_PASS direct_multiple_fold=1 dd_low_residual=1 local_delta_injection=1 rare_dd_boundary=1 unit_direct=1 miss_diag=1')
