@@ -7,23 +7,30 @@ src = Path('bench_sine_53_wide_octant_v8_build.c').read_text()
 
 insert_at = src.index('OVEC static inline __m512d mode5_poly_i32_low')
 anchor_code = r'''
-/* Xeon experiment: replace six per-degree Mode-5 coefficient gathers by two
-   anchor gathers (sin(a), cos(a)) and evaluate the same secant-spine C/T local
-   identity entirely in registers.  In production these 403 pairs are shipped
-   constants; MPFR generation here is setup-only and excluded from timing. */
-static double *xeon_asin, *xeon_acos;
+/* Xeon experiment v2: four anchor gathers instead of the fused Mode-5
+   coefficient-gather chain.  Each cached sin/cos anchor is stored as a
+   binary64 hi+lo pair so the C/T reconstruction does not lose the anchor
+   residual that caused the two-gather 2-ULP stress tail.  Production would
+   ship these constants; MPFR generation here is setup-only and untimed. */
+static double *xeon_s_hi,*xeon_s_lo,*xeon_c_hi,*xeon_c_lo;
 static int xeon_anchor_init(void)
 {
-    xeon_asin=al64((size_t)LUTN*sizeof(double));
-    xeon_acos=al64((size_t)LUTN*sizeof(double));
-    if(!xeon_asin||!xeon_acos)return 0;
+    xeon_s_hi=al64((size_t)LUTN*sizeof(double));
+    xeon_s_lo=al64((size_t)LUTN*sizeof(double));
+    xeon_c_hi=al64((size_t)LUTN*sizeof(double));
+    xeon_c_lo=al64((size_t)LUTN*sizeof(double));
+    if(!xeon_s_hi||!xeon_s_lo||!xeon_c_hi||!xeon_c_lo)return 0;
     mpfr_t a,s,c; mpfr_init2(a,256); mpfr_init2(s,256); mpfr_init2(c,256);
     for(size_t i=0;i<LUTN;i++){
         mpfr_set_ui(a,(unsigned long)i,MPFR_RNDN);
         mpfr_div_2ui(a,a,SF_K,MPFR_RNDN);
         mpfr_sin_cos(s,c,a,MPFR_RNDN);
-        xeon_asin[i]=mpfr_get_d(s,MPFR_RNDN);
-        xeon_acos[i]=mpfr_get_d(c,MPFR_RNDN);
+        double sh=mpfr_get_d(s,MPFR_RNDN), ch=mpfr_get_d(c,MPFR_RNDN);
+        xeon_s_hi[i]=sh; xeon_c_hi[i]=ch;
+        mpfr_sub_d(s,s,sh,MPFR_RNDN);
+        mpfr_sub_d(c,c,ch,MPFR_RNDN);
+        xeon_s_lo[i]=mpfr_get_d(s,MPFR_RNDN);
+        xeon_c_lo[i]=mpfr_get_d(c,MPFR_RNDN);
     }
     mpfr_clear(c); mpfr_clear(s); mpfr_clear(a); return 1;
 }
@@ -39,14 +46,17 @@ OVEC static inline __m512d xeon_ct_i32(__m512d yh,__m512d yl,__mmask8 signmask)
     __m512d d=_mm512_fnmadd_pd(jd,VIK,yh);
     d=_mm512_add_pd(d,yl);
     __m512d z=_mm512_mul_pd(d,d);
-    /* Same secant-spine C=cos(d), T=sin(d)/d realization; one additional
-       z term repairs the 2-ULP tail seen in the first two-gather experiment. */
     __m512d C=_mm512_fmadd_pd(z,_mm512_fmadd_pd(z,_mm512_fmadd_pd(z,MC720,C24),MH),ONE);
     __m512d T=_mm512_fmadd_pd(z,_mm512_fmadd_pd(z,_mm512_fmadd_pd(z,MT5040,C120),MSIX),ONE);
-    __m512d sa=_mm512_i32gather_pd(ji,xeon_asin,8);
-    __m512d ca=_mm512_i32gather_pd(ji,xeon_acos,8);
+    __m512d sh=_mm512_i32gather_pd(ji,xeon_s_hi,8);
+    __m512d ch=_mm512_i32gather_pd(ji,xeon_c_hi,8);
+    __m512d sl=_mm512_i32gather_pd(ji,xeon_s_lo,8);
+    __m512d cl=_mm512_i32gather_pd(ji,xeon_c_lo,8);
     __m512d dt=_mm512_mul_pd(d,T);
-    __m512d p=_mm512_fmadd_pd(ca,dt,_mm512_mul_pd(sa,C));
+    __m512d p=_mm512_fmadd_pd(ch,dt,_mm512_mul_pd(sh,C));
+    /* Restore the anchor low words after the dominant hi-word computation. */
+    p=_mm512_fmadd_pd(sl,C,p);
+    p=_mm512_fmadd_pd(cl,dt,p);
     return _mm512_mask_sub_pd(p,signmask,Z,p);
 }
 
@@ -87,8 +97,7 @@ new_vec = r'''OVEC static void octant_vector_v8(const s53w_kernel *k,const doubl
         __mmask8 guarded=(__mmask8)((_mm512_cmp_pd_mask(frac,VFT,_CMP_LT_OQ)|
                                      _mm512_cmp_pd_mask(frac,V1MFT,_CMP_GT_OQ))&wide);
 
-        /* Octant logic from bits instead of seven equality masks.
-           r=o&3; adjustment=[0,-1,+2,+1]=(r&2)-(r&1). */
+        /* Octant logic from bits: r=o&3; adjustment [0,-1,+2,+1]. */
         __m256i oi=_mm256_and_si256(qi,I7);
         __m256i r=_mm256_and_si256(oi,I3);
         __m256i b1=_mm256_and_si256(r,I1), b2=_mm256_and_si256(r,I2);
@@ -99,7 +108,7 @@ new_vec = r'''OVEC static void octant_vector_v8(const s53w_kernel *k,const doubl
         __m256i b4=_mm256_and_si256(oi,I4);
         __mmask8 wide_neg=(__mmask8)((~mask_eq_i32(b4,0))&wide);
 
-        /* Keep v8's proven compensated Cody-Waite residual. */
+        /* v8's proven compensated Cody-Waite residual. */
         __m512d t1=_mm512_mul_pd(md,VC1);
         __m512d r0=_mm512_sub_pd(ax,t1);
         __m512d t2=_mm512_mul_pd(md,VC2);
@@ -124,17 +133,15 @@ new_vec = r'''OVEC static void octant_vector_v8(const s53w_kernel *k,const doubl
 }'''
 src = src[:start] + new_vec + src[end:]
 
-# Setup-only anchor creation before any verification/timing.
 needle='s53w_kernel *k=kernel_create(2);'
 if needle not in src:
     raise SystemExit('kernel-create marker not found')
 src=src.replace(needle,'if(!xeon_anchor_init())return 2;'+needle,1)
 
-# Distinguish output and function names from the v8 baseline.
-src=src.replace('S53O8_', 'S53X1_')
-src=src.replace('octant_v8', 'octant_x1')
-src=src.replace('_v8', '_x1')
-src=src.replace('cosine_style_pi4_octant_guarded_x1_compensated_cw','cosine_style_pi4_octant_guarded_xeon2g_compensated_cw')
-src=src.replace('AVX512_pi4_octant_int32_compensated_cw','AVX512_pi4_octant_int32_compensated_cw_2anchor_gather')
-Path('bench_sine_53_xeon_v1_build.c').write_text(src)
-print('S53X1_BUILD_PASS two_anchor_gathers=1 ct_z3=1 octant_bitlogic=1 v8_compensated_cw=1 rare_table_DD_boundary=1 formula=unchanged_secant_spine_CT')
+src=src.replace('S53O8_', 'S53X2_')
+src=src.replace('octant_v8', 'octant_x2')
+src=src.replace('_v8', '_x2')
+src=src.replace('cosine_style_pi4_octant_guarded_x2_compensated_cw','cosine_style_pi4_octant_guarded_xeon4g_compensated_cw')
+src=src.replace('AVX512_pi4_octant_int32_compensated_cw','AVX512_pi4_octant_int32_compensated_cw_4anchor_gather')
+Path('bench_sine_53_xeon_v2_build.c').write_text(src)
+print('S53X2_BUILD_PASS four_anchor_gathers=1 anchor_dd=1 ct_z3=1 octant_bitlogic=1 v8_compensated_cw=1 rare_table_DD_boundary=1 formula=unchanged_secant_spine_CT')
