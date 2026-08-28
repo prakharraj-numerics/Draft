@@ -24,48 +24,43 @@ for b in range(4):
         f'        d{b}=_mm512_fnmadd_pd(jd{b},VIK,rh{b});\n'
         f'        d{b}=_mm512_add_pd(d{b},rl{b});')
 
-# Remove the X38/X41 late sequence after ji3.
-marker='        ji3=_mm512_cvt_roundpd_epi32(_mm512_mul_pd(rh3,VK),_MM_FROUND_TO_NEAREST_INT|_MM_FROUND_NO_EXC);'
-late=[marker,'        /* X38: per-stream gather pair, then independent delta work. */']
+# Remove the X38/X41 sequence which waits for all four indices before issuing
+# any gather. Leave a private placeholder after ji3 for the deferred delta/c1.
+marker3='        ji3=_mm512_cvt_roundpd_epi32(_mm512_mul_pd(rh3,VK),_MM_FROUND_TO_NEAREST_INT|_MM_FROUND_NO_EXC);'
+late=[marker3,'        /* X38: per-stream gather pair, then independent delta work. */']
 for b in range(4):
     late += [g0[b],g1[b],delta[b]]
 late_text='\n'.join(late)
 if late_text not in s:
     raise SystemExit('X41 stagger sequence marker missing')
-s=s.replace(late_text,marker,1)
+placeholder='        /* X44_DEFERRED_WORK */'
+s=s.replace(late_text,marker3+'\n'+placeholder,1)
 
-# Issue memory work immediately when each stream's anchor index becomes ready,
-# rather than waiting for all four streams. This moves gather latency under the
-# following streams' reducer/index arithmetic without changing expressions.
+# Issue memory work immediately when each stream's anchor index becomes ready.
+# This allows L1 gather latency to overlap the following streams' reducer/index
+# arithmetic. Floating-point expressions and anchor indices are unchanged.
 for b in range(4):
     imarker=f'        ji{b}=_mm512_cvt_roundpd_epi32(_mm512_mul_pd(rh{b},VK),_MM_FROUND_TO_NEAREST_INT|_MM_FROUND_NO_EXC);'
     if imarker not in s:
         raise SystemExit(f'index marker missing stream {b}')
     if mode=='pair':
-        ins=imarker+'\n        /* early pair: overlap L1 gather latency with later stream preparation */\n'+g0[b]+'\n'+g1[b]
+        ins=imarker+'\n        /* early pair: overlap gather latency with later stream preparation */\n'+g0[b]+'\n'+g1[b]
     else:
-        ins=imarker+'\n        /* early c0: lower live-register pressure; c1 stays late */\n'+g0[b]
+        ins=imarker+'\n        /* early c0: overlap one gather while limiting live ZMM pressure */\n'+g0[b]
     s=s.replace(imarker,ins,1)
 
-# Delta remains after all stream preparation. In c0 mode, issue late c1 just
-# before each independent delta so its latency can overlap following streams.
-anchor=marker
 if mode=='pair':
-    tail=anchor+'\n        /* all coefficient gathers are already in flight/complete */\n'+'\n'.join(delta)
+    deferred='        /* both coefficient planes already issued early */\n'+'\n'.join(delta)
     tag='X44'; prefix='S53X44_'; arch='xeon_x44_early_pair_gather_g4'; label='Xeon_AVX512_X44_early_pair_gather_pipeline'
 else:
-    seq=[anchor,'        /* c0 was issued early; stagger late c1 with delta arithmetic */']
+    seq=['        /* c0 issued early; stagger c1 with independent delta arithmetic */']
     for b in range(4):
         seq += [g1[b],delta[b]]
-    tail='\n'.join(seq)
+    deferred='\n'.join(seq)
     tag='X45'; prefix='S53X45_'; arch='xeon_x45_early_c0_gather_g4'; label='Xeon_AVX512_X45_early_c0_gather_pipeline'
-# Because marker was also expanded above when b=3, replace the unique bare
-# occurrence that remains at the end of the four prepare blocks.
-idx=s.find(anchor)
-# choose last occurrence: early insertion retains the marker text as prefix.
-idx=s.rfind(anchor)
-if idx<0: raise SystemExit('final ji3 marker missing')
-s=s[:idx]+tail+s[idx+len(anchor):]
+if placeholder not in s:
+    raise SystemExit('deferred-work placeholder missing')
+s=s.replace(placeholder,deferred,1)
 
 s=s.replace('S53X41_',prefix)
 s=s.replace('xeon_x41_branchless_exact_fma_delta_g4',arch)
