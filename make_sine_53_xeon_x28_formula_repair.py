@@ -21,21 +21,32 @@ p = Path('bench_sine_53_xeon_x27_formula_evenodd_build.c')
 s = p.read_text()
 th = f'0x1p-{R}'
 
-# The regrouped formula has different rounding. Only when the reduced sine
-# argument is very near a zero can that rounding become >1 ULP. In that rare
-# region, recompute the same degree-5 jet using X23's serial Horner grouping.
-# Common path remains the formula-carried split.
+# The regrouped formula has different rounding. Only near a sine zero can that
+# rounding become >1 ULP. There, recompute the same degree-5 jet with X23's
+# serial-Horner grouping. Patch each helper inside its own function scope so
+# the appropriate reduced-argument variable (y vs ya) is used unambiguously.
 marker = '    p=_mm512_fmadd_pd(cd,B,p);\n'
-if s.count(marker) != 2:
-    raise SystemExit(f'expected 2 helper formula markers, found {s.count(marker)}')
 
-repair_y = f'''    p=_mm512_fmadd_pd(cd,B,p);\n    __mmask8 fr=_mm512_cmp_pd_mask(y,_mm512_set1_pd({th}),_CMP_LT_OQ);\n    if(__builtin_expect(fr!=0,0)){{\n        __m512d c2=_mm512_mul_pd(c0,MH),c3=_mm512_mul_pd(c1,M6);\n        __m512d c4=_mm512_mul_pd(c0,C24),c5=_mm512_mul_pd(c1,C120);\n        __m512d q=_mm512_fmadd_pd(c5,d,c4);\n        q=_mm512_fmadd_pd(q,d,c3); q=_mm512_fmadd_pd(q,d,c2);\n        q=_mm512_fmadd_pd(q,d,c1); q=_mm512_fmadd_pd(q,d,c0);\n        p=_mm512_mask_mov_pd(p,fr,q);\n    }}\n'''
-s = s.replace(marker, repair_y, 1)
+def patch_helper(text, start_name, end_name, argvar, maskname):
+    start = text.index(start_name)
+    end = text.index(end_name, start)
+    sec = text[start:end]
+    if sec.count(marker) != 1:
+        raise SystemExit(f'{start_name}: expected 1 formula marker, found {sec.count(marker)}')
+    repair = f'''    p=_mm512_fmadd_pd(cd,B,p);\n    __mmask8 {maskname}=_mm512_cmp_pd_mask({argvar},_mm512_set1_pd({th}),_CMP_LT_OQ);\n    if(__builtin_expect({maskname}!=0,0)){{\n        __m512d c2r=_mm512_mul_pd(c0,MH),c3r=_mm512_mul_pd(c1,M6);\n        __m512d c4r=_mm512_mul_pd(c0,C24),c5r=_mm512_mul_pd(c1,C120);\n        __m512d qr=_mm512_fmadd_pd(c5r,d,c4r);\n        qr=_mm512_fmadd_pd(qr,d,c3r); qr=_mm512_fmadd_pd(qr,d,c2r);\n        qr=_mm512_fmadd_pd(qr,d,c1); qr=_mm512_fmadd_pd(qr,d,c0);\n        p=_mm512_mask_mov_pd(p,{maskname},qr);\n    }}\n'''
+    sec = sec.replace(marker, repair, 1)
+    return text[:start] + sec + text[end:]
 
-repair_ya = f'''    p=_mm512_fmadd_pd(cd,B,p);\n    __mmask8 fr=_mm512_cmp_pd_mask(ya,_mm512_set1_pd({th}),_CMP_LT_OQ);\n    if(__builtin_expect(fr!=0,0)){{\n        __m512d c2=_mm512_mul_pd(c0,MH),c3=_mm512_mul_pd(c1,M6);\n        __m512d c4=_mm512_mul_pd(c0,C24),c5=_mm512_mul_pd(c1,C120);\n        __m512d q=_mm512_fmadd_pd(c5,d,c4);\n        q=_mm512_fmadd_pd(q,d,c3); q=_mm512_fmadd_pd(q,d,c2);\n        q=_mm512_fmadd_pd(q,d,c1); q=_mm512_fmadd_pd(q,d,c0);\n        p=_mm512_mask_mov_pd(p,fr,q);\n    }}\n'''
-s = s.replace(marker, repair_ya, 1)
+s = patch_helper(s,
+    'OVEC static inline __m512d mode5_poly_x11',
+    'OVEC static inline __m512d mode5_poly_low_x11',
+    'y', 'fr_y')
+s = patch_helper(s,
+    'OVEC static inline __m512d mode5_poly_low_x11',
+    'OVEC static inline void twodiff_cw',
+    'ya', 'fr_ya')
 
-# G4 hot path. ya{b}=abs(reduced argument), a{b}=active lanes.
+# G4 hot path. ya{b}=absolute reduced sine argument; a{b}=active lanes.
 for b in range(4):
     marker_b = f'        p{b}=_mm512_fmadd_pd(cd{b},B{b},p{b});'
     if marker_b not in s:
