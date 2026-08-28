@@ -1,0 +1,116 @@
+name: Sine 53-bit X41 branchless delta campaign
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ sine53-xeon-tuned-v2 ]
+    paths:
+      - 'make_sine_53_xeon_x41_branchless_delta.py'
+      - '.github/workflows/sine-53-xeon-x41-branchless-delta.yml'
+
+env:
+  FLINT_PREFIX: /home/runner/flint36
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect Intel AVX512 host
+        id: cpu
+        shell: bash
+        run: |
+          VENDOR="$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/,"",$2); print $2}')"
+          lscpu | grep -E 'Vendor ID|Model name|CPU\(s\)|Thread\(s\) per core|Core\(s\) per socket|L1d cache|L2 cache|L3 cache'
+          if [ "$VENDOR" = GenuineIntel ] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f; then echo eligible=1 >> "$GITHUB_OUTPUT"; else echo eligible=0 >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/cache@v4
+        if: steps.cpu.outputs.eligible == '1'
+        with:
+          path: /opt/intel/oneapi
+          key: intel-oneapi-prof3-intel-2026.1.0-236-2026.1.1-325-v1
+      - name: Base packages
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \( -iname '*microsoft*' -o -iname '*azure*' \) -delete || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential binutils libgmp-dev libmpfr-dev
+      - uses: actions/cache@v4
+        if: steps.cpu.outputs.eligible == '1'
+        with:
+          path: /home/runner/flint36
+          key: flint-3.6.0-ubuntu24-x86_64-native-cd49f6116fb977da331dbb6627f4998397730a62253bd7a70a201ad5a00576d7-v2
+      - name: Generate X40 X41 X42
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
+          python3 make_sine_53_xeon_x40_isolated.py; cp bench_sine_53_xeon_x40_isolated_build.c /tmp/x40.c
+          python3 make_sine_53_xeon_x41_branchless_delta.py fma; cp bench_sine_53_xeon_x41_build.c /tmp/x41.c
+          python3 make_sine_53_xeon_x41_branchless_delta.py mulsub; cp bench_sine_53_xeon_x42_build.c /tmp/x42.c
+      - name: Compile all variants and machine code
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          MKLROOT=/opt/intel/oneapi/mkl/latest; CC=/opt/intel/oneapi/compiler/latest/bin/icx
+          INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
+          LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
+          mkdir -p /tmp/x41analysis
+          for v in x40 x41 x42; do
+            cp /tmp/${v}.c /tmp/${v}_acc.c
+            python3 inject_sine53_unique9600.py /tmp/${v}_acc.c
+            "$CC" -O3 -xHost -fp-model=precise $INC /tmp/${v}_acc.c -o /tmp/${v}_acc $LIBS
+            cp /tmp/${v}_acc.c /tmp/${v}_spd.c
+            python3 patch_sine53_x27_speed_ceiling.py /tmp/${v}_spd.c
+            "$CC" -O3 -xHost -fp-model=precise $INC /tmp/${v}_spd.c -o /tmp/${v}_spd $LIBS
+            objdump -drwC -Mintel --disassemble=octant_vector_v8 /tmp/${v}_spd > /tmp/x41analysis/${v}.hot.objdump || true
+          done
+      - name: Compare isolated machine code
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set +e
+          echo "CPU=$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')" | tee /tmp/x41analysis/machine.txt
+          for v in x40 x41 x42; do
+            echo "=== $v HOT ===" | tee -a /tmp/x41analysis/machine.txt
+            printf 'gathers=' | tee -a /tmp/x41analysis/machine.txt; grep -Eic 'vgather(d|q)?pd' /tmp/x41analysis/${v}.hot.objdump | tee -a /tmp/x41analysis/machine.txt
+            printf 'fmadd_fnmadd=' | tee -a /tmp/x41analysis/machine.txt; grep -Eic 'vfmadd|vfnmadd' /tmp/x41analysis/${v}.hot.objdump | tee -a /tmp/x41analysis/machine.txt
+            printf 'conditional_jumps=' | tee -a /tmp/x41analysis/machine.txt; grep -Eic '\b(j[a-z]+)\b' /tmp/x41analysis/${v}.hot.objdump | tee -a /tmp/x41analysis/machine.txt
+            printf 'pu_cmp_ff=' | tee -a /tmp/x41analysis/machine.txt; grep -Eic 'cmp.*0xff' /tmp/x41analysis/${v}.hot.objdump | tee -a /tmp/x41analysis/machine.txt
+            printf 'stack_refs=' | tee -a /tmp/x41analysis/machine.txt; grep -Eic '\[(r|e)sp[+\-]' /tmp/x41analysis/${v}.hot.objdump | tee -a /tmp/x41analysis/machine.txt
+          done
+          exit 0
+      - name: Full Arb gate and same-run timing
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set +e
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:$MKLROOT/lib:${LD_LIBRARY_PATH:-}"
+          : > /tmp/x41analysis/results.txt
+          for v in x40 x41 x42; do
+            echo "=== ${v} ACCURACY ===" | tee -a /tmp/x41analysis/results.txt
+            stdbuf -oL -eL /tmp/${v}_acc 2>&1 | tee -a /tmp/x41analysis/results.txt
+            echo "ACC_RC_${v}=${PIPESTATUS[0]}" | tee -a /tmp/x41analysis/results.txt
+            echo "=== ${v} SPEED ===" | tee -a /tmp/x41analysis/results.txt
+            stdbuf -oL -eL /tmp/${v}_spd 2>&1 | tee -a /tmp/x41analysis/results.txt
+          done
+          exit 0
+      - name: Upload branchless analysis
+        if: always() && steps.cpu.outputs.eligible == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sine53-x41-branchless-${{ matrix.slot }}
+          path: /tmp/x41analysis
+          if-no-files-found: ignore
