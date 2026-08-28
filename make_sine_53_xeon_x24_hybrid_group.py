@@ -10,6 +10,7 @@ if B not in (12,16,20): raise SystemExit('threshold bits must be 12,16,20')
 # Start from the generalized one-pass two-gather Mode-5 scheduler, then replace
 # only its reducer by the accuracy-gated nearest-pi 2-piece fast path + rare
 # 3-piece repair. This lets us re-tune ILP width after the reducer got cheaper.
+# x24 width-sweep trigger after workflow registration.
 saved=sys.argv[:]
 try:
     sys.argv=['make_sine_53_xeon_x21_batch_search.py','plane',str(G)]
