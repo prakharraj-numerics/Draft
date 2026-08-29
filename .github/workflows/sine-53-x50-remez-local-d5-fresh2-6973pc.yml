@@ -1,0 +1,114 @@
+name: X50 Remez local d5 vs X50 Intel fresh2 6973P-C
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ sine53-xeon-tuned-v2 ]
+    paths:
+      - '.github/workflows/sine-53-x50-remez-local-d5-fresh2-6973pc.yml'
+
+env:
+  FLINT_PREFIX: /home/runner/flint36
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require exact 6973P-C host
+        id: cpu
+        shell: bash
+        run: |
+          MODEL="$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          lscpu | grep -E 'Vendor ID|Model name|CPU\(s\)|L2 cache|L3 cache'
+          if [[ "$MODEL" == *"6973P-C"* ]] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f; then
+            echo eligible=1 >> "$GITHUB_OUTPUT"
+          else
+            echo eligible=0 >> "$GITHUB_OUTPUT"
+            echo SKIP
+          fi
+
+      - uses: actions/cache@v4
+        if: steps.cpu.outputs.eligible == '1'
+        with:
+          path: /opt/intel/oneapi
+          key: intel-oneapi-prof3-intel-2026.1.0-236-2026.1.1-325-v1
+
+      - name: Packages
+        if: steps.cpu.outputs.eligible == '1'
+        run: |
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \( -iname '*microsoft*' -o -iname '*azure*' \) -delete || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential binutils libgmp-dev libmpfr-dev
+
+      - uses: actions/cache@v4
+        if: steps.cpu.outputs.eligible == '1'
+        with:
+          path: /home/runner/flint36
+          key: flint-3.6.0-ubuntu24-x86_64-native-cd49f6116fb977da331dbb6627f4998397730a62253bd7a70a201ad5a00576d7-v2
+
+      - name: Generate baseline and Remez d5 candidate
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
+          python3 make_sine_53_xeon_x50_x53_hw_campaign.py
+          cp bench_sine_53_xeon_x50_build.c /tmp/base.c
+          python3 make_sine_53_x50_remez_local_d5.py
+          cp bench_sine_53_x50_remez_local_d5_build.c /tmp/remez.c
+          grep -q 'S53X50R5_' /tmp/remez.c
+
+      - name: Compile and inspect
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          CC=/opt/intel/oneapi/compiler/latest/bin/icx
+          INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
+          LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
+          mkdir -p /tmp/r5res
+          for v in base remez; do
+            cp /tmp/${v}.c /tmp/${v}_bands.c
+            python3 inject_sine53_unique9600_bands.py /tmp/${v}_bands.c
+            "$CC" -O3 -xHost -fp-model=precise $INC /tmp/${v}_bands.c -o /tmp/${v}_bands $LIBS
+            objdump -d -M intel /tmp/${v}_bands > /tmp/r5res/${v}.asm
+            echo "CENSUS_${v} gathers=$(grep -Ec 'vgather|vpgather' /tmp/r5res/${v}.asm || true) fmadd=$(grep -Ec 'vfmadd|vfnmadd|vfmsub|vfnmsub' /tmp/r5res/${v}.asm || true)" | tee -a /tmp/r5res/results.txt
+          done
+          if nm -u /tmp/remez_bands | grep -Eq '(^|[[:space:]])(sin|cos)(@|$)'; then echo RUNTIME_LIBM_TRIG_FOUND; exit 7; else echo RUNTIME_LIBM_TRIG_ABSENT=1 | tee -a /tmp/r5res/results.txt; fi
+
+      - name: Accuracy and timing
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set +e
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:$MKLROOT/lib:${LD_LIBRARY_PATH:-}"
+          echo "CPU=$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')" | tee -a /tmp/r5res/results.txt
+          echo 'CANDIDATE=X50_Remez_local_d5 fresh2; parent=X50; reducer=unchanged; Mode5_secant_spine=unchanged; degree5=1; quintic_preserved=1' | tee -a /tmp/r5res/results.txt
+          for v in base remez; do
+            echo "=== $v ===" | tee -a /tmp/r5res/results.txt
+            /usr/bin/time -v stdbuf -oL -eL /tmp/${v}_bands 2>&1 | tee -a /tmp/r5res/results.txt
+            rc=${PIPESTATUS[0]}
+            echo "RC_${v}=$rc" | tee -a /tmp/r5res/results.txt
+          done
+          exit 0
+
+      - name: Upload
+        if: always() && steps.cpu.outputs.eligible == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: x50-remez-local-d5-fresh2-6973pc-${{ matrix.slot }}
+          path: /tmp/r5res
+          if-no-files-found: ignore
