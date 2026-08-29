@@ -1,0 +1,120 @@
+name: Sine 53-bit X57-X59 public Xeon techniques
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - sine53-xeon-tuned-v2
+    paths:
+      - make_sine_53_xeon_x57_masked_direct.py
+      - make_sine_53_xeon_x58_onegather.py
+      - make_sine_53_xeon_x59_intel_reducer.py
+      - .github/workflows/sine-53-xeon-x57-x59-public-techniques.yml
+
+env:
+  FLINT_PREFIX: /home/runner/flint36
+
+jobs:
+  benchmark:
+    name: X57-X59 benchmark slot ${{ matrix.slot }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,
+               17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32]
+    timeout-minutes: 55
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check CPU eligibility
+        id: cpu
+        run: |
+          vendor=$(lscpu | grep 'Vendor ID' | awk '{print $NF}')
+          has_avx512=$(grep -c 'avx512f' /proc/cpuinfo || echo 0)
+          
+          if [ "$vendor" = "GenuineIntel" ] && [ "$has_avx512" -gt 0 ]; then
+            echo "eligible=1" >> $GITHUB_OUTPUT
+            echo "Eligible Intel AVX-512 Xeon detected"
+            echo "=== CPU Information ==="
+            lscpu | grep -E '(Model name|CPU|Thread|Socket|Cache)'
+          else
+            echo "eligible=0" >> $GITHUB_OUTPUT
+            echo "Not an eligible Intel AVX-512 Xeon platform"
+          fi
+
+      - name: Install base dependencies
+        if: steps.cpu.outputs.eligible == '1'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential binutils libgmp-dev libmpfr-dev
+
+      - name: Create build directory
+        if: steps.cpu.outputs.eligible == '1'
+        run: |
+          mkdir -p /tmp/publictech
+
+      - name: Harness adjustments
+        if: steps.cpu.outputs.eligible == '1'
+        run: |
+          cd "${{ github.workspace }}"
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's/#define INVK (1.0\/4096.0)/#define INVK (1.0\/256.0)/' bench_sine_53_wide_intel.c
+
+      - name: Generate X56 baseline
+        if: steps.cpu.outputs.eligible == '1'
+        run: |
+          cd "${{ github.workspace }}"
+          python3 make_sine_53_xeon_x56_cf_protected.py 2>&1 | tee /tmp/publictech/x56_gen.log
+
+      - name: Generate X57 variant
+        if: steps.cpu.outputs.eligible == '1'
+        run: |
+          cd "${{ github.workspace }}"
+          python3 make_sine_53_xeon_x57_masked_direct.py 2>&1 | tee /tmp/publictech/x57_gen.log || true
+
+      - name: Generate X58 variant
+        if: steps.cpu.outputs.eligible == '1'
+        run: |
+          cd "${{ github.workspace }}"
+          python3 make_sine_53_xeon_x58_onegather.py 2>&1 | tee /tmp/publictech/x58_gen.log || true
+
+      - name: Generate X59 variant
+        if: steps.cpu.outputs.eligible == '1'
+        run: |
+          cd "${{ github.workspace }}"
+          python3 make_sine_53_xeon_x59_intel_reducer.py 2>&1 | tee /tmp/publictech/x59_gen.log || true
+
+      - name: Copy generated files
+        if: steps.cpu.outputs.eligible == '1'
+        run: |
+          cp "${{ github.workspace }}/bench_sine_53_xeon_x56_build.c" /tmp/x56.c || touch /tmp/x56.c
+          cp "${{ github.workspace }}/bench_sine_53_xeon_x57_build.c" /tmp/x57.c || touch /tmp/x57.c
+          cp "${{ github.workspace }}/bench_sine_53_xeon_x58_build.c" /tmp/x58.c || touch /tmp/x58.c
+          cp "${{ github.workspace }}/bench_sine_53_xeon_x59_build.c" /tmp/x59.c || touch /tmp/x59.c
+
+      - name: Collect machine information
+        if: steps.cpu.outputs.eligible == '1'
+        run: |
+          {
+            echo "=== CPU Information ==="
+            lscpu
+            echo ""
+            echo "=== Memory ==="
+            free -h
+            echo ""
+            echo "=== Uname ==="
+            uname -a
+          } > /tmp/publictech/machine.txt
+
+      - name: Upload artifacts
+        if: always() && steps.cpu.outputs.eligible == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sine53-public-techniques-${{ matrix.slot }}
+          path: /tmp/publictech/
+          if-no-files-found: ignore
