@@ -1,0 +1,71 @@
+name: X65 final secant-state512 no-prescan fresh1 6973P-C
+on:
+  push:
+    branches: [ sine53-xeon-tuned-v2 ]
+  workflow_dispatch:
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
+    runs-on: ubuntu-24.04
+    env:
+      FLINT_PREFIX: /home/runner/flint36
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require exact 6973P-C host
+        id: gate
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          MODEL="$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          lscpu | grep -E 'Vendor ID|Model name|CPU\(s\)|L2 cache|L3 cache'
+          if [[ "$MODEL" == *"6973P-C"* ]] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f; then echo eligible=1 >> "$GITHUB_OUTPUT"; else echo eligible=0 >> "$GITHUB_OUTPUT"; echo SKIP; fi
+      - uses: actions/cache@v4
+        if: steps.gate.outputs.eligible == '1'
+        with:
+          path: /opt/intel/oneapi
+          key: intel-oneapi-prof3-intel-2026.1.0-236-2026.1.1-325-v1
+      - name: Packages
+        if: steps.gate.outputs.eligible == '1'
+        run: |
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \( -iname '*microsoft*' -o -iname '*azure*' \) -delete || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential binutils libgmp-dev libmpfr-dev python3-mpmath
+      - uses: actions/cache@v4
+        if: steps.gate.outputs.eligible == '1'
+        with:
+          path: /home/runner/flint36
+          key: flint-3.6.0-ubuntu24-x86_64-native-cd49f6116fb977da331dbb6627f4998397730a62253bd7a70a201ad5a00576d7-v2
+      - name: Generate compile inspect benchmark
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          set -euo pipefail
+          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
+          python3 make_sine_53_x65_secant_state512_final.py
+          python3 patch_sine53_x65_remove_prescan.py
+          cp bench_sine_53_xeon_x65_build.c /tmp/x65.c
+          python3 inject_sine53_x65_final_bands.py /tmp/x65.c
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          CC=/opt/intel/oneapi/compiler/latest/bin/icx
+          INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
+          LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
+          "$CC" -O3 -xHost -fp-model=precise $INC /tmp/x65.c -o /tmp/x65 $LIBS
+          mkdir -p /tmp/x65res
+          objdump -drwC -Mintel --disassemble=octant_vector_v8_rawx65 /tmp/x65 > /tmp/x65res/x65.objdump || true
+          f=/tmp/x65res/x65.objdump
+          echo "CENSUS gathers=$(grep -Eic 'vgather(d|q)?pd' "$f" || true) fma=$(grep -Eic 'v(fmadd|fnmadd|fmsub|fnmsub)' "$f" || true) div=$(grep -Eic 'vdivpd' "$f" || true) rcp=$(grep -Eic 'vrcp14pd' "$f" || true) cvt=$(grep -Eic 'vcvt|vcvtt|vpmovqd' "$f" || true) branches=$(grep -Eic '\bj[a-z]+\b' "$f" || true) lines=$(wc -l < "$f")" | tee /tmp/x65res/results.txt
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:$MKLROOT/lib:${LD_LIBRARY_PATH:-}"
+          stdbuf -oL -eL /tmp/x65 2>&1 | tee -a /tmp/x65res/results.txt
+      - name: Upload
+        if: steps.gate.outputs.eligible == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: x65-final-secstate512-noscan-fresh1-6973pc-${{ matrix.slot }}
+          path: /tmp/x65res
+          if-no-files-found: ignore
