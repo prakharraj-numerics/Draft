@@ -65,9 +65,10 @@ jobs:
           python3 - <<'PY' | tee /tmp/x50diag/hot-c.txt
           from pathlib import Path
           s=Path('/tmp/x49.c').read_text()
-          a=s.index('OVEC static void octant_vector_v8')
-          b=s.find('\nOVEC static ',a+10)
-          if b<0: b=min(len(s),a+30000)
+          hit=s.index('octant_vector_v8(const s53w_kernel *k,')
+          a=s.rfind('\n',0,hit)+1
+          b=s.find('\nOVEC ',hit+10)
+          if b<0: b=min(len(s),a+40000)
           print(s[a:b])
           PY
           MKLROOT=/opt/intel/oneapi/mkl/latest; CC=/opt/intel/oneapi/compiler/latest/bin/icx
