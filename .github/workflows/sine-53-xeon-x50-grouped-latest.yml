@@ -1,0 +1,102 @@
+name: Sine 53-bit X50 grouped-range latest
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ sine53-xeon-tuned-v2 ]
+    paths:
+      - '.github/workflows/sine-53-xeon-x50-grouped-latest.yml'
+
+env:
+  FLINT_PREFIX: /home/runner/flint36
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect Intel AVX512 host
+        id: cpu
+        shell: bash
+        run: |
+          VENDOR="$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/,"",$2); print $2}')"
+          lscpu | grep -E 'Vendor ID|Model name|CPU\(s\)|L2 cache|L3 cache'
+          if [ "$VENDOR" = GenuineIntel ] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f; then echo eligible=1 >> "$GITHUB_OUTPUT"; else echo eligible=0 >> "$GITHUB_OUTPUT"; fi
+      - name: Base packages
+        if: steps.cpu.outputs.eligible == '1'
+        run: |
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \( -iname '*microsoft*' -o -iname '*azure*' \) -delete || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential binutils curl ca-certificates gnupg libgmp-dev libmpfr-dev
+      - name: Restore Intel oneAPI
+        if: steps.cpu.outputs.eligible == '1'
+        id: oneapi-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/intel/oneapi
+          key: intel-oneapi-prof3-intel-2026.1.0-236-2026.1.1-325-v1
+      - name: Install Intel oneAPI on cache miss
+        if: steps.cpu.outputs.eligible == '1' && steps.oneapi-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL https://apt.repos.intel.com/oneapi/intel-oneapi-archive-keyring.gpg | sudo gpg --dearmor -o /usr/share/keyrings/oneapi-archive-keyring.gpg
+          echo 'deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main' | sudo tee /etc/apt/sources.list.d/oneAPI.list
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends intel-oneapi-mkl-devel intel-oneapi-compiler-dpcpp-cpp
+      - name: Restore FLINT 3.6.0
+        if: steps.cpu.outputs.eligible == '1'
+        id: flint-cache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/flint36
+          key: flint-3.6.0-ubuntu24-x86_64-native-cd49f6116fb977da331dbb6627f4998397730a62253bd7a70a201ad5a00576d7-v2
+      - name: Generate latest grouped benchmark
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
+          python3 make_sine_53_xeon_x50_x53_hw_campaign.py
+          cp bench_sine_53_xeon_x50_build.c /tmp/x50_grouped_latest.c
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/x50_grouped_latest.c'); s=p.read_text()
+          pos=s.rfind('\nint main(void)')
+          if pos<0: raise SystemExit('main not found')
+          main=r'''
+          static void make_mixed(double*x,size_t n){for(size_t i=0;i<n;i++){uint64_t h=mix64(UINT64_C(2026082919000)+(uint64_t)i*UINT64_C(0x9e3779b97f4a7c15));double u=unit52(h),lo,hi;int b=(int)(i%3);if(b==0){lo=0;hi=1;}else if(b==1){lo=1;hi=500;}else{lo=1000;hi=10000;}double m=fma(hi-lo,u,lo);x[i]=(i&1)?-m:m;}}
+          static void make_grouped(double*x,size_t n){size_t q0=n/3,q1=2*n/3;for(size_t i=0;i<n;i++){uint64_t h=mix64(UINT64_C(2026082919000)+(uint64_t)i*UINT64_C(0x9e3779b97f4a7c15));double u=unit52(h),lo,hi;int b=i<q0?0:(i<q1?1:2);if(b==0){lo=0;hi=1;}else if(b==1){lo=1;hi=500;}else{lo=1000;hi=10000;}double m=fma(hi-lo,u,lo);x[i]=(i&1)?-m:m;}}
+          static double med9(double*a){qsort(a,9,sizeof(double),cmpd);return a[4];}
+          static void bench_one(const s53w_kernel*k,double*x,double*y,double*yi,size_t n,int grouped){enum{TR=9};int rounds=(int)(30000000ULL/n);if(rounds<300)rounds=300;if(grouped)make_grouped(x,n);else make_mixed(x,n);for(int w=0;w<100;w++){octant_vector_v8(k,x,y,n);vmdSin((MKL_INT)n,x,yi,VML_HA);}double to[TR],ti[TR];volatile double sink=0;for(int t=0;t<TR;t++){uint64_t z=now_ns();for(int r=0;r<rounds;r++)octant_vector_v8(k,x,y,n);to[t]=(double)(now_ns()-z)/(rounds*(double)n);z=now_ns();for(int r=0;r<rounds;r++)vmdSin((MKL_INT)n,x,yi,VML_HA);ti[t]=(double)(now_ns()-z)/(rounds*(double)n);sink+=y[(17*t)%n]+yi[(19*t)%n];}double o=med9(to),iv=med9(ti);printf("GROUPED_LATEST n=%zu layout=%s ours_ns=%.9f intel_ns=%.9f ours_over_intel=%.6f intel_over_ours=%.6f sink=%.17g\n",n,grouped?"grouped_range":"mixed",o,iv,o/iv,iv/o,(double)sink);}
+          int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53_X50_GROUPED_RANGE_LATEST cpu_pin=%d contract=input_grouped_by_abs_range bands=lt1,1to500,ge1000\n",cpu);if(!redtab2_init())return 2;s53w_kernel*k=kernel_create(2);if(!k)return 3;const size_t M=100000;double*x=al64(M*8),*y=al64(M*8),*yi=al64(M*8);if(!x||!y||!yi)return 4;size_t ns[]={150,1200,9600,10000,100000};for(size_t j=0;j<5;j++){bench_one(k,x,y,yi,ns[j],0);bench_one(k,x,y,yi,ns[j],1);}free(yi);free(y);free(x);kernel_destroy(k);redtab2_clear();flint_cleanup_master();return 0;}
+          '''
+          p.write_text(s[:pos]+main)
+          PY
+      - name: Compile and benchmark
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/x50grouped
+          MKLROOT=/opt/intel/oneapi/mkl/latest; CC=/opt/intel/oneapi/compiler/latest/bin/icx
+          LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
+          "$CC" -O3 -xHost -fp-model=precise -DNDEBUG -I"$FLINT_PREFIX/include" -I"$MKLROOT/include" -I. /tmp/x50_grouped_latest.c -o /tmp/x50_grouped_latest $LIBS 2>&1 | tee /tmp/x50grouped/compile.log
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:$MKLROOT/lib:${LD_LIBRARY_PATH:-}"
+          echo "CPU=$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')" | tee /tmp/x50grouped/results.txt
+          "$CC" --version | head -1 | tee -a /tmp/x50grouped/results.txt
+          stdbuf -oL -eL /tmp/x50_grouped_latest 2>&1 | tee -a /tmp/x50grouped/results.txt
+      - name: Upload result
+        if: always() && steps.cpu.outputs.eligible == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sine53-x50-grouped-latest-${{ matrix.slot }}
+          path: /tmp/x50grouped
+          if-no-files-found: ignore
