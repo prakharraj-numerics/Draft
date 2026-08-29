@@ -1,6 +1,6 @@
 name: Sine 53-bit X61 formula-preserving no-gather
 
-# fresh-run trigger 2026-08-29b
+# fresh-run trigger 2026-08-29c
 on:
   workflow_dispatch:
   push:
