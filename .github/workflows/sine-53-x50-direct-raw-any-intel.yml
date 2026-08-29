@@ -6,6 +6,7 @@ on:
     branches: [ sine53-xeon-tuned-v2 ]
     paths:
       - '.github/workflows/sine-53-x50-direct-raw-any-intel.yml'
+      - 'make_sine_53_xeon_x50_direct_raw.py'
 
 env:
   FLINT_PREFIX: /home/runner/flint36
