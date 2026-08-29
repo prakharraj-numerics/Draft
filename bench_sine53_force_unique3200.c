@@ -25,9 +25,6 @@ static void force_bench_band(const s53w_kernel *k,int band,const char *label)
     double *yi=al64((size_t)n*sizeof(double));
     if(!x||!yo||!yi){printf("S53FORCE_ALLOC_FAIL band=%s\n",label);free(yi);free(yo);free(x);return;}
     force_make_band3200(x,band);
-
-    /* Accuracy is reported but NEVER blocks timing. This is a performance
-       diagnostic requested to measure raw-input cost independent of reduction. */
     int valid=verify_v8(label,k,x,n);
 
     volatile double sink=0;
@@ -62,10 +59,11 @@ int main(void)
 {
     int cpu=pin();
     mkl_set_num_threads_local(1);
+    if(!redtab2_init()){fprintf(stderr,"redtab2_init failed\n");return 2;}
     printf("S53FORCE_DOMAIN cpu_pin=%d backend=%s LUTN=%lu terms=2 bands=abs_lt_1,abs_1_to_500,abs_1000_to_10000 trials=7 evals=30000000_per_band accuracy_nonblocking=1\n",
            cpu,backend(),(unsigned long)LUTN);
     s53w_kernel *k=kernel_create(2);
-    if(!k){fprintf(stderr,"kernel_create failed\n");return 2;}
+    if(!k){fprintf(stderr,"kernel_create failed\n");redtab2_clear();return 3;}
     force_bench_band(k,0,"abs_lt_1");
     force_bench_band(k,1,"abs_1_to_500");
     force_bench_band(k,2,"abs_1000_to_10000");
