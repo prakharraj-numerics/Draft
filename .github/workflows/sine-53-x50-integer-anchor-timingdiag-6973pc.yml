@@ -1,0 +1,131 @@
+name: X50 integer-anchor timing diagnostic 6973P-C
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ sine53-xeon-tuned-v2 ]
+    paths:
+      - '.github/workflows/sine-53-x50-integer-anchor-timingdiag-6973pc.yml'
+
+env:
+  FLINT_PREFIX: /home/runner/flint36
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require exact 6973P-C host
+        id: cpu
+        shell: bash
+        run: |
+          MODEL="$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          lscpu | grep -E 'Vendor ID|Model name|CPU\(s\)|L2 cache|L3 cache'
+          if [[ "$MODEL" == *"6973P-C"* ]] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f; then echo eligible=1 >> "$GITHUB_OUTPUT"; else echo eligible=0 >> "$GITHUB_OUTPUT"; echo SKIP; fi
+      - uses: actions/cache@v4
+        if: steps.cpu.outputs.eligible == '1'
+        with:
+          path: /opt/intel/oneapi
+          key: intel-oneapi-prof3-intel-2026.1.0-236-2026.1.1-325-v1
+      - name: Packages
+        if: steps.cpu.outputs.eligible == '1'
+        run: |
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \( -iname '*microsoft*' -o -iname '*azure*' \) -delete || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential binutils libgmp-dev libmpfr-dev
+      - uses: actions/cache@v4
+        if: steps.cpu.outputs.eligible == '1'
+        with:
+          path: /home/runner/flint36
+          key: flint-3.6.0-ubuntu24-x86_64-native-cd49f6116fb977da331dbb6627f4998397730a62253bd7a70a201ad5a00576d7-v2
+      - name: Generate baseline candidate and prebuilt integer table
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
+          python3 make_sine_53_xeon_x50_x53_hw_campaign.py
+          cp bench_sine_53_xeon_x50_build.c /tmp/base.c
+          python3 make_sine_53_x50_integer_anchor.py
+          cp bench_sine_53_x50_integer_anchor_build.c /tmp/int.c
+          cat >/tmp/gen_inttab.c <<'EOF'
+          #include <stdio.h>
+          #include <mpfr.h>
+          int main(void){
+            mpfr_t x,s,c; mpfr_inits2(256,x,s,c,(mpfr_ptr)0);
+            FILE *f=fopen("/tmp/inttab.c","w"); if(!f) return 2;
+            fprintf(f,"#include <stddef.h>\nconst double s53_int_sin[65537]={\n");
+            for(unsigned n=0;n<=65536;n++){mpfr_set_ui(x,n,MPFR_RNDN);mpfr_sin(s,x,MPFR_RNDN);fprintf(f,"%a,%s",mpfr_get_d(s,MPFR_RNDN),(n%4==3)?"\n":"");}
+            fprintf(f,"};\nconst double s53_int_cos[65537]={\n");
+            for(unsigned n=0;n<=65536;n++){mpfr_set_ui(x,n,MPFR_RNDN);mpfr_cos(c,x,MPFR_RNDN);fprintf(f,"%a,%s",mpfr_get_d(c,MPFR_RNDN),(n%4==3)?"\n":"");}
+            fprintf(f,"};\n"); fclose(f); mpfr_clears(x,s,c,(mpfr_ptr)0); return 0;
+          }
+          EOF
+          cc -O2 /tmp/gen_inttab.c -lmpfr -lgmp -o /tmp/gen_inttab
+          /tmp/gen_inttab
+      - name: Compile diagnostic that times even when accuracy fails
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          MKLROOT=/opt/intel/oneapi/mkl/latest; CC=/opt/intel/oneapi/compiler/latest/bin/icx
+          INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
+          LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
+          mkdir -p /tmp/intres
+          for v in base int; do
+            cp /tmp/${v}.c /tmp/${v}_bands.c
+            python3 inject_sine53_unique9600_bands.py /tmp/${v}_bands.c
+            if [[ "$v" == int ]]; then
+              python3 - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/int_bands.c'); s=p.read_text()
+          # Do not let the requested150 gate terminate the timing diagnostic.
+          q=s.find('requested150')
+          r=s.find('return 4;',q)
+          if q < 0 or r < 0: raise SystemExit('requested150 return-4 gate not found')
+          s=s[:r]+'fprintf(stderr,"S53X50INT_TIMING_DIAGNOSTIC accuracy_invalid=1 continuing_to_time=1\\n");'+s[r+9:]
+          old='if(!verify_v8(label,k,x,n)){printf("S53UNIQB_INVALID band=%s accuracy_gate=fail\\n",label);free(yi);free(yo);free(x);return;}'
+          new='int diag_ok=verify_v8(label,k,x,n); if(!diag_ok) printf("S53UNIQB_INVALID band=%s accuracy_gate=fail timing_continues=1\\n",label);'
+          if old not in s: raise SystemExit('unique-band accuracy return gate not found')
+          s=s.replace(old,new,1)
+          s=s.replace('Arb256_all=1 sink=', 'Arb256_all=0 diagnostic_invalid_accuracy=1 sink=')
+          p.write_text(s)
+          print('S53X50INT_TIMING_PATCH_PASS requested150_continue=1 unique_band_continue=1 invalid_accuracy_tag=1')
+          PY
+              extra=/tmp/inttab.c
+            else
+              extra=""
+            fi
+            "$CC" -O3 -xHost -fp-model=precise $INC /tmp/${v}_bands.c $extra -o /tmp/${v}_bands $LIBS
+          done
+          if nm -u /tmp/int_bands | grep -Eq '(^|[[:space:]])(sin|cos)(@|$)'; then echo RUNTIME_LIBM_TRIG_FOUND; exit 7; else echo RUNTIME_LIBM_TRIG_ABSENT=1; fi
+      - name: Run diagnostic timings
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set +e
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:$MKLROOT/lib:${LD_LIBRARY_PATH:-}"
+          echo "CPU=$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')" | tee /tmp/intres/results.txt
+          echo 'WARNING=integer candidate accuracy-invalid; timings diagnostic only' | tee -a /tmp/intres/results.txt
+          for v in base int; do
+            echo "=== $v ===" | tee -a /tmp/intres/results.txt
+            /usr/bin/time -v stdbuf -oL -eL /tmp/${v}_bands 2>&1 | tee -a /tmp/intres/results.txt
+            echo "RC_${v}=${PIPESTATUS[0]}" | tee -a /tmp/intres/results.txt
+          done
+      - name: Upload
+        if: always() && steps.cpu.outputs.eligible == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: x50-integer-anchor-timingdiag-6973pc-${{ matrix.slot }}
+          path: /tmp/intres
+          if-no-files-found: ignore
