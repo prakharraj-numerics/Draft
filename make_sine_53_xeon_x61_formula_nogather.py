@@ -1,20 +1,42 @@
 from pathlib import Path
-import runpy
+import runpy, re
 
 runpy.run_path('make_sine_53_xeon_x50_x53_hw_campaign.py', run_name='__main__')
 s=Path('bench_sine_53_xeon_x50_build.c').read_text()
-old='typedef struct { sine_fixed_ctx *ctx; int terms,deg; double *tab; } s53w_kernel;'
-new='typedef struct { sine_fixed_ctx *ctx; int terms,deg; double *tab; double *anchor_pack; } s53w_kernel;'
-if old not in s: raise SystemExit('kernel struct marker missing')
-s=s.replace(old,new,1)
-oldc='for(int a=0;a<LUTN;a++){size_t off=(size_t)a*(size_t)(k->deg+1);for(int j=0;j<=k->deg;j++)k->tab[(size_t)j*LUTN+(size_t)a]=coeff_to_double(k->ctx->coef+2*(off+(size_t)j),k->ctx->coef_sign[off+(size_t)j]!=0);}return k;}'
-newc='for(int a=0;a<LUTN;a++){size_t off=(size_t)a*(size_t)(k->deg+1);for(int j=0;j<=k->deg;j++)k->tab[(size_t)j*LUTN+(size_t)a]=coeff_to_double(k->ctx->coef+2*(off+(size_t)j),k->ctx->coef_sign[off+(size_t)j]!=0);}k->anchor_pack=al64(48*sizeof(double));if(!k->anchor_pack){free(k->tab);s53_coeff_destroy(k->ctx);free(k);return NULL;}for(int q=0;q<8;q++){k->anchor_pack[q]=k->tab[q];k->anchor_pack[8+q]=k->tab[LUTN+q];k->anchor_pack[16+q]=k->tab[8*q];k->anchor_pack[24+q]=k->tab[LUTN+8*q];int j=64*q;if(j>=LUTN)j=0;k->anchor_pack[32+q]=k->tab[j];k->anchor_pack[40+q]=k->tab[LUTN+j];}return k;}'
-if oldc not in s: raise SystemExit('kernel_create tail marker missing')
-s=s.replace(oldc,newc,1)
-oldd='static void kernel_destroy(s53w_kernel*k){if(!k)return;free(k->tab);s53_coeff_destroy(k->ctx);free(k);}'
-newd='static void kernel_destroy(s53w_kernel*k){if(!k)return;free(k->anchor_pack);free(k->tab);s53_coeff_destroy(k->ctx);free(k);}'
-if oldd not in s: raise SystemExit('kernel_destroy marker missing')
-s=s.replace(oldd,newd,1)
+
+# X50's generated translation unit may preserve or reflow the compact typedef.
+# Patch the actual s53w_kernel typedef structurally instead of relying on one
+# exact whitespace spelling.
+pat=r'typedef\s+struct\s*\{(?P<body>[^{}]*?sine_fixed_ctx\s*\*\s*ctx[^{}]*?double\s*\*\s*tab\s*;[^{}]*?)\}\s*s53w_kernel\s*;'
+m=re.search(pat,s,re.S)
+if not m:
+    raise SystemExit('kernel struct marker missing')
+body=m.group('body')
+if 'anchor_pack' not in body:
+    body=body.rstrip()+' double *anchor_pack; '
+s=s[:m.start()]+('typedef struct {'+body+'} s53w_kernel;')+s[m.end():]
+
+# Add a 48-double aligned pack holding original Mode5 c0/c1 anchor values at
+# radix-8 basis positions: a, 8b, 64c.  Runtime reconstructs arbitrary anchor
+# j=a+8b+64c with angle addition, so the hot loop has no coefficient gathers.
+kpos=s.find('static s53w_kernel *kernel_create')
+if kpos < 0:
+    raise SystemExit('kernel_create marker missing')
+ret=s.find('return k;',kpos)
+if ret < 0:
+    raise SystemExit('kernel_create return marker missing')
+init='''k->anchor_pack=al64(48*sizeof(double));if(!k->anchor_pack){free(k->tab);s53_coeff_destroy(k->ctx);free(k);return NULL;}for(int q=0;q<8;q++){k->anchor_pack[q]=k->tab[q];k->anchor_pack[8+q]=k->tab[LUTN+q];k->anchor_pack[16+q]=k->tab[8*q];k->anchor_pack[24+q]=k->tab[LUTN+8*q];int j=64*q;if(j>=LUTN)j=0;k->anchor_pack[32+q]=k->tab[j];k->anchor_pack[40+q]=k->tab[LUTN+j];}'''
+s=s[:ret]+init+s[ret:]
+
+# Free the pack before the original table.
+dpos=s.find('static void kernel_destroy')
+if dpos < 0:
+    raise SystemExit('kernel_destroy marker missing')
+freepos=s.find('free(k->tab);',dpos)
+if freepos < 0:
+    raise SystemExit('kernel_destroy free marker missing')
+s=s[:freepos]+'free(k->anchor_pack);'+s[freepos:]
+
 hit=s.index('octant_vector_v8(const s53w_kernel *k,')
 start=s.rfind('\n',0,hit)+1
 end=s.index('\n#endif',hit)
