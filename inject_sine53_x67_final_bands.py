@@ -7,6 +7,6 @@ static void x67_run(const s53w_kernel*k,int which,const char*tag){const int n=32
 '''
 s=s[:mainpos]+helper+s[mainpos:];mainpos=s.index('\nint main(void)')
 s=s[:mainpos]+r'''
-int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("X67_MAIN cpu=%d frozen_math=1 user_secant_spine=1 raw_x=1 state512=1 synchronized=1 certified_horner=1\n",cpu);s53w_kernel*k=kernel_create(2);if(!k)return 5;x67_run(k,0,"abs_1_to_500");x67_run(k,1,"abs_1000_to_10000");kernel_destroy(k);redtab2_clear();flint_cleanup_master();return 0;}
+int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("X67_MAIN cpu=%d frozen_X66=1 cancellation_aware_grouping=1 no_fallback=1\n",cpu);s53w_kernel*k=kernel_create(2);if(!k)return 5;x67_run(k,0,"abs_1_to_500");x67_run(k,1,"abs_1000_to_10000");kernel_destroy(k);redtab2_clear();flint_cleanup_master();return 0;}
 '''
 p.write_text(s)
