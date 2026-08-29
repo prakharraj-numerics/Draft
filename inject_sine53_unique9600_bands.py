@@ -53,6 +53,32 @@ static void bench_unique9600_bands(const s53w_kernel *k)
 }
 '''
 s=s[:mainpos]+helper+s[mainpos:]
+
+# The direct-raw experiment intentionally defines only |x|<=10000.  Its purpose
+# is to measure whether raw magnitudes cost more than the ordinary <1 path.
+# Do not run unrelated legacy stress sets that extend beyond this domain.
+if 'raw_bands' in p.name:
+    mainpos=s.index('\nint main(void)')
+    rawmain=r'''
+int main(void)
+{
+    int cpu=pin();
+    mkl_set_num_threads_local(1);
+    printf("S53X50RAW_DIAGNOSTIC_MAIN cpu_pin=%d domain=abs_le_10000 legacy_ood_stress=skipped purpose=direct_raw_speed\n",cpu);
+    s53w_kernel *k=kernel_create(2);
+    if(!k) return 5;
+    bench_unique9600_bands(k);
+    kernel_destroy(k);
+    redtab2_clear();
+    flint_cleanup_master();
+    return 0;
+}
+'''
+    s=s[:mainpos]+rawmain
+    p.write_text(s)
+    print('S53UNIQB_INJECT_PASS raw_diagnostic_main=1 bands=3 cases_per_band=3200 trials=7 Arb256_gate=1 legacy_ood_stress=skipped')
+    raise SystemExit(0)
+
 needle='int rc=bench_v8(k,x);bench_batches_x11(k,x);kernel_destroy(k);redtab2_clear();flint_cleanup_master();return rc;'
 if needle not in s:
     raise SystemExit('v11/v12 main tail not found for banded unique9600 injection')
