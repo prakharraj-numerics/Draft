@@ -1,0 +1,96 @@
+name: Sine 53-bit X50-X54 hardware campaign forensics
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ sine53-xeon-hw-x50-x54 ]
+    paths:
+      - '.github/workflows/sine-53-xeon-x50-x54-forensics.yml'
+
+env:
+  FLINT_PREFIX: /home/runner/flint36
+
+jobs:
+  forensic:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect Intel AVX512 host
+        id: cpu
+        shell: bash
+        run: |
+          VENDOR="$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/,"",$2); print $2}')"
+          lscpu | grep -E 'Vendor ID|Model name|CPU\(s\)|Thread\(s\) per core|Core\(s\) per socket|L1d cache|L2 cache|L3 cache'
+          if [ "$VENDOR" = GenuineIntel ] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f; then echo eligible=1 >> "$GITHUB_OUTPUT"; else echo eligible=0 >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/cache@v4
+        if: steps.cpu.outputs.eligible == '1'
+        with:
+          path: /opt/intel/oneapi
+          key: intel-oneapi-prof3-intel-2026.1.0-236-2026.1.1-325-v1
+      - name: Packages
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \( -iname '*microsoft*' -o -iname '*azure*' \) -delete || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential binutils libgmp-dev libmpfr-dev
+      - uses: actions/cache@v4
+        if: steps.cpu.outputs.eligible == '1'
+        with:
+          path: /home/runner/flint36
+          key: flint-3.6.0-ubuntu24-x86_64-native-cd49f6116fb977da331dbb6627f4998397730a62253bd7a70a201ad5a00576d7-v2
+      - name: Generate exact X49 source
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
+          python3 make_sine_53_xeon_x49_production.py
+          cp bench_sine_53_xeon_x49_build.c /tmp/x49.c
+      - name: Print X49 hot C and exact assembly
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/x50diag
+          python3 - <<'PY' | tee /tmp/x50diag/hot-c.txt
+          from pathlib import Path
+          s=Path('/tmp/x49.c').read_text()
+          a=s.index('OVEC static void octant_vector_v8')
+          b=s.find('\nOVEC static ',a+10)
+          if b<0: b=min(len(s),a+30000)
+          print(s[a:b])
+          PY
+          MKLROOT=/opt/intel/oneapi/mkl/latest; CC=/opt/intel/oneapi/compiler/latest/bin/icx
+          INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
+          LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
+          cp /tmp/x49.c /tmp/x49_spd.c
+          python3 inject_sine53_unique9600.py /tmp/x49_spd.c
+          python3 patch_sine53_x27_speed_ceiling.py /tmp/x49_spd.c
+          "$CC" -O3 -xHost -fp-model=precise $INC /tmp/x49_spd.c -o /tmp/x49_spd $LIBS
+          "$CC" -O3 -xHost -fp-model=precise -S -masm=intel -fverbose-asm $INC /tmp/x49_spd.c -o /tmp/x50diag/x49.s
+          objdump -drwC -Mintel --disassemble=octant_vector_v8 /tmp/x49_spd > /tmp/x50diag/x49.hot.objdump || true
+          echo '=== HOT OBJDUMP ==='
+          cat /tmp/x50diag/x49.hot.objdump
+          echo '=== STATIC COUNTS ==='
+          printf 'gathers='; grep -Eic 'vgather(d|q)?pd' /tmp/x50diag/x49.hot.objdump || true
+          printf 'fmadd_fnmadd='; grep -Eic 'vfmadd|vfnmadd' /tmp/x50diag/x49.hot.objdump || true
+          printf 'kmov='; grep -Eic '\bkmov' /tmp/x50diag/x49.hot.objdump || true
+          printf 'stack_refs='; grep -Eic '\[(r|e)sp[+\-]' /tmp/x50diag/x49.hot.objdump || true
+          printf 'jcc='; grep -Eic '\bj[a-z]+' /tmp/x50diag/x49.hot.objdump || true
+      - name: Upload forensic image
+        if: always() && steps.cpu.outputs.eligible == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: x49-forensic-${{ matrix.slot }}
+          path: /tmp/x50diag
+          if-no-files-found: ignore
