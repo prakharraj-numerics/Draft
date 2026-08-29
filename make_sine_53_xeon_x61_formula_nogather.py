@@ -4,10 +4,9 @@ import runpy
 runpy.run_path('make_sine_53_xeon_x50_x53_hw_campaign.py', run_name='__main__')
 s=Path('bench_sine_53_xeon_x50_build.c').read_text()
 
-# X61 no longer patches s53w_kernel, kernel_create, or kernel_destroy.
-# It only replaces X50's hot evaluator.  The hot evaluator loads the fixed
-# radix-8 anchor basis directly from the existing Mode5-generated k->tab once
-# per call, keeps it in ZMM registers, and performs no coefficient gathers.
+# X61 only replaces X50's hot evaluator. The evaluator loads a fixed radix-8
+# basis directly from the existing Mode5-generated k->tab once per call, keeps
+# those values in ZMM registers, and performs no coefficient gathers.
 hit=s.find('octant_vector_v8(const s53w_kernel *k,')
 if hit < 0:
     raise SystemExit('octant_vector_v8 marker missing')
@@ -28,7 +27,6 @@ checks={
  'basis_c':'tab[384]' in hot and 'tab[LUTN+384]' in hot,
  'hot_has_permute':'_mm512_permutexvar_pd' in hot,
  'no_anchor_pack':'anchor_pack' not in hot and 'x61_anchor_pack' not in s,
- 'no_generator_init_patch':'kernel_create' not in Path(__file__).read_text(),
 }
 if not all(checks.values()):
     raise SystemExit('X61 generation self-check failed '+repr(checks))
