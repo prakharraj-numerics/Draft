@@ -1,0 +1,61 @@
+name: Disassemble exact oneMKL AVX512 HA sine kernel
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ sine53-xeon-tuned-v2 ]
+    paths:
+      - '.github/workflows/sine-53-intel-ha-symbol-focus.yml'
+
+jobs:
+  inspect:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1,2,3,4,5,6,7,8]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require exact 6973P-C
+        id: cpu
+        shell: bash
+        run: |
+          MODEL="$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          lscpu | grep -E 'Vendor ID|Model name|CPU\(s\)|L2 cache|L3 cache'
+          echo "model=$MODEL"
+          if [[ "$MODEL" == *"6973P-C"* ]] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f; then echo eligible=1 >> "$GITHUB_OUTPUT"; else echo eligible=0 >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/cache@v4
+        if: steps.cpu.outputs.eligible == '1'
+        with:
+          path: /opt/intel/oneapi
+          key: intel-oneapi-prof3-intel-2026.1.0-236-2026.1.1-325-v1
+      - name: Focus exact HA symbol
+        if: steps.cpu.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          LIB=/opt/intel/oneapi/mkl/latest/lib/libmkl_vml_avx512.so.3
+          OUT=/tmp/intelha; mkdir -p "$OUT"
+          SYM=mkl_vml_kernel_dSin_Z0HAynn
+          echo "CPU=$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')" > "$OUT/summary.txt"
+          echo "LIB=$LIB" >> "$OUT/summary.txt"
+          nm -D --defined-only "$LIB" | grep -E 'mkl_vml_kernel_dSin(_|I_)|dSin_[A-Za-z0-9]+' > "$OUT/dsin-symbols.txt" || true
+          readelf -Ws "$LIB" | grep "$SYM" > "$OUT/ha-readelf.txt"
+          objdump -drwC -Mintel --disassemble="$SYM" "$LIB" > "$OUT/ha.objdump"
+          grep -Eai 'vfmadd|vfnmadd|vmulpd|vaddpd|vsubpd|vpsllq|vpsrlq|vcvt|vrnd|round|vgetmant|vreduce|vrange|vfixup|gather|perm|cmp|kortest|kand|kxor|call|jmp' "$OUT/ha.objdump" > "$OUT/ha-key.txt" || true
+          printf 'fma=' > "$OUT/census.txt"; grep -Eic 'v(fmadd|fnmadd)' "$OUT/ha.objdump" >> "$OUT/census.txt" || true
+          printf 'cvt=' >> "$OUT/census.txt"; grep -Eic 'vcvt' "$OUT/ha.objdump" >> "$OUT/census.txt" || true
+          printf 'shiftq=' >> "$OUT/census.txt"; grep -Eic 'vps(ll|rl)q' "$OUT/ha.objdump" >> "$OUT/census.txt" || true
+          printf 'gather=' >> "$OUT/census.txt"; grep -Eic 'vgather' "$OUT/ha.objdump" >> "$OUT/census.txt" || true
+          printf 'calls=' >> "$OUT/census.txt"; grep -Eic '[[:space:]]call[[:space:]]' "$OUT/ha.objdump" >> "$OUT/census.txt" || true
+          # Capture RIP-relative constants/data references from the exact HA kernel.
+          grep -Eo '# [0-9a-f]+ <[^>]+>' "$OUT/ha.objdump" | sort -u > "$OUT/refs.txt" || true
+          wc -l "$OUT/ha.objdump" "$OUT/ha-key.txt" "$OUT/refs.txt" >> "$OUT/summary.txt"
+      - name: Upload
+        if: always() && steps.cpu.outputs.eligible == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: intel-ha-dsin-focus-${{ matrix.slot }}
+          path: /tmp/intelha
+          if-no-files-found: ignore
