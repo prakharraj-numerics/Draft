@@ -6,10 +6,16 @@ OVEC __attribute__((noinline,hot,aligned(64))) static void octant_vector_v8(cons
     const __m512d VK=_mm512_set1_pd(KGRID),VIK=_mm512_set1_pd(INVK),Z=_mm512_setzero_pd();
     const __m512d MH=_mm512_set1_pd(-0.5),M6=_mm512_set1_pd(-1.0/6.0),C24=_mm512_set1_pd(1.0/24.0),C120=_mm512_set1_pd(1.0/120.0);
     const __m512i M7=_mm512_set1_epi64(7);
-    const double *ap=(const double *)__builtin_assume_aligned(k->anchor_pack,64);
-    const __m512d SA=_mm512_load_pd(ap+0*8),CA=_mm512_load_pd(ap+1*8);
-    const __m512d SB=_mm512_load_pd(ap+2*8),CB=_mm512_load_pd(ap+3*8);
-    const __m512d SC=_mm512_load_pd(ap+4*8),CC=_mm512_load_pd(ap+5*8);
+    const double *tab=(const double *)__builtin_assume_aligned(k->tab,64);
+
+    /* Original Mode5-generated anchor values, loaded once per call.  No
+       coefficient gathers: radix-8 basis values stay in six ZMM registers. */
+    const __m512d SA=_mm512_load_pd(tab),CA=_mm512_load_pd(tab+LUTN);
+    const __m512d SB=_mm512_setr_pd(tab[0],tab[8],tab[16],tab[24],tab[32],tab[40],tab[48],tab[56]);
+    const __m512d CB=_mm512_setr_pd(tab[LUTN+0],tab[LUTN+8],tab[LUTN+16],tab[LUTN+24],tab[LUTN+32],tab[LUTN+40],tab[LUTN+48],tab[LUTN+56]);
+    const __m512d SC=_mm512_setr_pd(tab[0],tab[64],tab[128],tab[192],tab[256],tab[320],tab[384],tab[0]);
+    const __m512d CC=_mm512_setr_pd(tab[LUTN+0],tab[LUTN+64],tab[LUTN+128],tab[LUTN+192],tab[LUTN+256],tab[LUTN+320],tab[LUTN+384],tab[LUTN+0]);
+
     size_t i=0;
     for(;i+32<=n;i+=32){
         for(int b=0;b<4;b++){
