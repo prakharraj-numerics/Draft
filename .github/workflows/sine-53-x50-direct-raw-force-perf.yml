@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        slot: [1,2,3,4,5,6,7,8]
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
     runs-on: ubuntu-24.04
     timeout-minutes: 55
     steps:
@@ -61,6 +61,9 @@ jobs:
           sed -i 's/#define SF_LUT_N 403UL/#define SF_LUT_N 2560001UL/' sine_53_coeff_source.c
           python3 make_sine_53_xeon_x50_direct_raw.py
           cp bench_sine_53_xeon_x50_direct_raw_build.c /tmp/raw.c
+          # The generated benchmark source has its own final main. Rename it so
+          # the forced non-aborting driver can provide the only process entrypoint.
+          sed -i 's/^int main(void)/int s53_generated_disabled_main(void)/' /tmp/base.c /tmp/raw.c
       - name: Compile identical forced timing drivers
         if: steps.cpu.outputs.eligible == '1'
         shell: bash
