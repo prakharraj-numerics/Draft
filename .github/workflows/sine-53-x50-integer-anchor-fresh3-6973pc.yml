@@ -75,7 +75,6 @@ jobs:
           cc -O2 /tmp/gen_inttab.c -lmpfr -lgmp -o /tmp/gen_inttab
           /tmp/gen_inttab
           echo "PREBUILT_TABLE_BYTES=$(wc -c </tmp/inttab.c)"
-          grep -E 'sin\(|cos\(' /tmp/int.c && { echo RUNTIME_TRIG_FOUND; exit 7; } || true
       - name: Compile and inspect
         if: steps.cpu.outputs.eligible == '1'
         shell: bash
@@ -92,6 +91,7 @@ jobs:
             "$CC" -O3 -xHost -fp-model=precise $INC /tmp/${v}_bands.c $extra -o /tmp/${v}_bands $LIBS
             objdump -drwC -Mintel --disassemble=octant_vector_v8 /tmp/${v}_bands > /tmp/intres/${v}.objdump || true
           done
+          if nm -u /tmp/int_bands | grep -Eq '(^|[[:space:]])(sin|cos)(@|$)'; then echo RUNTIME_LIBM_TRIG_FOUND; exit 7; else echo RUNTIME_LIBM_TRIG_ABSENT=1; fi
       - name: Run apples-to-apples
         if: steps.cpu.outputs.eligible == '1'
         shell: bash
