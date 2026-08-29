@@ -68,7 +68,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # 1/256 anchors covering [0,10000] inclusive: 10000*256+1
           sed -i 's/#define SF_LUT_N 403UL/#define SF_LUT_N 2560001UL/' sine_53_coeff_source.c
           python3 make_sine_53_xeon_x50_direct_raw.py
           cp bench_sine_53_xeon_x50_direct_raw_build.c /tmp/raw.c
@@ -118,3 +117,5 @@ jobs:
           name: x50-direct-raw-6973pc-${{ matrix.slot }}
           path: /tmp/rawres
           if-no-files-found: ignore
+
+# retrigger 2
