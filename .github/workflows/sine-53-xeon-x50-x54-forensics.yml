@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32]
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -27,6 +27,30 @@ jobs:
           VENDOR="$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/,"",$2); print $2}')"
           lscpu | grep -E 'Vendor ID|Model name|CPU\(s\)|Thread\(s\) per core|Core\(s\) per socket|L1d cache|L2 cache|L3 cache'
           if [ "$VENDOR" = GenuineIntel ] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f; then echo eligible=1 >> "$GITHUB_OUTPUT"; else echo eligible=0 >> "$GITHUB_OUTPUT"; fi
+      - name: Generate exact X49 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
+          python3 make_sine_53_xeon_x49_production.py
+          cp bench_sine_53_xeon_x49_build.c /tmp/x49.c
+          mkdir -p /tmp/x50diag
+      - name: Print exact X49 hot C
+        shell: bash
+        run: |
+          python3 - <<'PY' | tee /tmp/x50diag/hot-c.txt
+          from pathlib import Path
+          s=Path('/tmp/x49.c').read_text()
+          hit=s.index('octant_vector_v8(const s53w_kernel *k,')
+          a=s.rfind('\n',0,hit)+1
+          b=s.find('\nOVEC ',hit+10)
+          if b<0: b=min(len(s),a+50000)
+          print(s[a:b])
+          PY
       - uses: actions/cache@v4
         if: steps.cpu.outputs.eligible == '1'
         with:
@@ -44,36 +68,14 @@ jobs:
         with:
           path: /home/runner/flint36
           key: flint-3.6.0-ubuntu24-x86_64-native-cd49f6116fb977da331dbb6627f4998397730a62253bd7a70a201ad5a00576d7-v2
-      - name: Generate exact X49 source
+      - name: Compile exact X49 assembly
         if: steps.cpu.outputs.eligible == '1'
         shell: bash
         run: |
           set -euo pipefail
-          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
-          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
-          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
-          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
-          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
-          python3 make_sine_53_xeon_x49_production.py
-          cp bench_sine_53_xeon_x49_build.c /tmp/x49.c
-      - name: Print X49 hot C and exact assembly
-        if: steps.cpu.outputs.eligible == '1'
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p /tmp/x50diag
-          python3 - <<'PY' | tee /tmp/x50diag/hot-c.txt
-          from pathlib import Path
-          s=Path('/tmp/x49.c').read_text()
-          hit=s.index('octant_vector_v8(const s53w_kernel *k,')
-          a=s.rfind('\n',0,hit)+1
-          b=s.find('\nOVEC ',hit+10)
-          if b<0: b=min(len(s),a+40000)
-          print(s[a:b])
-          PY
           MKLROOT=/opt/intel/oneapi/mkl/latest; CC=/opt/intel/oneapi/compiler/latest/bin/icx
           INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
-          LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
+          LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$FLINT_PREFIX/lib -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
           cp /tmp/x49.c /tmp/x49_spd.c
           python3 inject_sine53_unique9600.py /tmp/x49_spd.c
           python3 patch_sine53_x27_speed_ceiling.py /tmp/x49_spd.c
@@ -89,7 +91,7 @@ jobs:
           printf 'stack_refs='; grep -Eic '\[(r|e)sp[+\-]' /tmp/x50diag/x49.hot.objdump || true
           printf 'jcc='; grep -Eic '\bj[a-z]+' /tmp/x50diag/x49.hot.objdump || true
       - name: Upload forensic image
-        if: always() && steps.cpu.outputs.eligible == '1'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: x49-forensic-${{ matrix.slot }}
