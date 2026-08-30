@@ -1,4 +1,4 @@
-name: Sine53 one-shot production cleanup
+name: Sine53 one-shot root production cleanup
 on:
   push:
     branches: [sine53-xeon-tuned-v2]
@@ -13,7 +13,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Freeze production pair into repository and remove experimental sine53 versions
+      - name: Freeze production pair and remove root experimental sine53 code
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -21,128 +21,32 @@ jobs:
           set -euo pipefail
           echo "BACKUP_BRANCH=sine53-x69-frozen-9600"
           echo "FREEZE_RUN=33301031553"
-          rm -rf /tmp/frozen
-          mkdir -p /tmp/frozen
+          rm -rf /tmp/frozen && mkdir -p /tmp/frozen
           gh run download 33301031553 -R "$GITHUB_REPOSITORY" -n sine53-frozen-x68-production-sources -D /tmp/frozen
           test "$(sha256sum /tmp/frozen/sine53_x50_unit_production.c | awk '{print $1}')" = "ba79230dc0154f198129b21eb87fd0f96de0457e0a7f08f6e78ec2d29dd1806c"
           test "$(sha256sum /tmp/frozen/sine53_x67_wide_production.c | awk '{print $1}')" = "586fcc695a06a855ab0c59a8bc791618685d4fcbabdf459b56ccd6c0b9190c5c"
           cp /tmp/frozen/sine53_x50_unit_production.c ./sine53_x50_unit_production.c
           cp /tmp/frozen/sine53_x67_wide_production.c ./sine53_x67_wide_production.c
-
           test -f inject_sine53_x50_unit3200.py
           test -f inject_sine53_x67_final_bands.py
-          mv inject_sine53_x50_unit3200.py sine53_production_inject_unit3200.py
-          mv inject_sine53_x67_final_bands.py sine53_production_inject_wide3200.py
-
-          cat > .github/workflows/sine-53-production-final-9600-6973pc.yml <<'YAML'
-          name: Sine53 production final 9600 6973P-C
-          on:
-            push:
-              branches: [ sine53-xeon-tuned-v2 ]
-            workflow_dispatch:
-          jobs:
-            benchmark:
-              strategy:
-                fail-fast: false
-                matrix:
-                  slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
-              runs-on: ubuntu-24.04
-              env:
-                FLINT_PREFIX: /home/runner/flint36
-              steps:
-                - uses: actions/checkout@v4
-                - name: Require exact 6973P-C host
-                  id: gate
-                  shell: bash --noprofile --norc -e -o pipefail {0}
-                  run: |
-                    MODEL="$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
-                    lscpu | grep -E 'Vendor ID|Model name|CPU\(s\)|L2 cache|L3 cache'
-                    if [[ "$MODEL" == *"6973P-C"* ]] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f; then echo eligible=1 >> "$GITHUB_OUTPUT"; else echo eligible=0 >> "$GITHUB_OUTPUT"; echo SKIP; fi
-                - uses: actions/cache@v4
-                  if: steps.gate.outputs.eligible == '1'
-                  with:
-                    path: /opt/intel/oneapi
-                    key: intel-oneapi-prof3-intel-2026.1.0-236-2026.1.1-325-v1
-                - name: Packages
-                  if: steps.gate.outputs.eligible == '1'
-                  run: |
-                    sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \( -iname '*microsoft*' -o -iname '*azure*' \) -delete || true
-                    sudo apt-get update -qq
-                    sudo apt-get install -y --no-install-recommends build-essential binutils libgmp-dev libmpfr-dev python3
-                - uses: actions/cache@v4
-                  if: steps.gate.outputs.eligible == '1'
-                  with:
-                    path: /home/runner/flint36
-                    key: flint-3.6.0-ubuntu24-x86_64-native-cd49f6116fb977da331dbb6627f4998397730a62253bd7a70a201ad5a00576d7-v2
-                - name: Compile and benchmark frozen production X50 + X67
-                  if: steps.gate.outputs.eligible == '1'
-                  shell: bash --noprofile --norc -e -o pipefail {0}
-                  run: |
-                    set -euo pipefail
-                    test "$(sha256sum sine53_x50_unit_production.c | awk '{print $1}')" = "ba79230dc0154f198129b21eb87fd0f96de0457e0a7f08f6e78ec2d29dd1806c"
-                    test "$(sha256sum sine53_x67_wide_production.c | awk '{print $1}')" = "586fcc695a06a855ab0c59a8bc791618685d4fcbabdf459b56ccd6c0b9190c5c"
-                    sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
-                    sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
-                    sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
-                    sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
-                    sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
-                    cp sine53_x50_unit_production.c /tmp/x50u.c
-                    python3 sine53_production_inject_unit3200.py /tmp/x50u.c
-                    cp sine53_x67_wide_production.c /tmp/x67w.c
-                    python3 sine53_production_inject_wide3200.py /tmp/x67w.c
-                    MKLROOT=/opt/intel/oneapi/mkl/latest
-                    CC=/opt/intel/oneapi/compiler/latest/bin/icx
-                    INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
-                    LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
-                    "$CC" -O3 -xHost -fp-model=precise $INC /tmp/x50u.c -o /tmp/x50u $LIBS
-                    "$CC" -O3 -xHost -fp-model=precise $INC /tmp/x67w.c -o /tmp/x67w $LIBS
-                    mkdir -p /tmp/s53final
-                    objdump -drwC -Mintel --disassemble=octant_vector_v8 /tmp/x50u > /tmp/s53final/x50_unit.objdump || true
-                    objdump -drwC -Mintel --disassemble=octant_vector_v8_rawx67 /tmp/x67w > /tmp/s53final/x67_wide.objdump || true
-                    export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:$MKLROOT/lib:${LD_LIBRARY_PATH:-}"
-                    echo 'SINE53_PRODUCTION_FINAL total_cases=9600 unit_engine=X50 wide_engine=X67 frozen_sources=1' | tee /tmp/s53final/results.txt
-                    stdbuf -oL -eL /tmp/x50u 2>&1 | tee -a /tmp/s53final/results.txt
-                    stdbuf -oL -eL /tmp/x67w 2>&1 | tee -a /tmp/s53final/results.txt
-                - name: Upload
-                  if: steps.gate.outputs.eligible == '1'
-                  uses: actions/upload-artifact@v4
-                  with:
-                    name: sine53-production-final-9600-6973pc-${{ matrix.slot }}
-                    path: /tmp/s53final
-                    if-no-files-found: ignore
-          YAML
-
+          cp inject_sine53_x50_unit3200.py sine53_production_inject_unit3200.py
+          cp inject_sine53_x67_final_bands.py sine53_production_inject_wide3200.py
           keep_re='^(sine53_x50_unit_production\.c|sine53_x67_wide_production\.c|sine53_production_inject_unit3200\.py|sine53_production_inject_wide3200\.py|bench_sine_53_wide_fast2\.c|bench_sine_53_wide_intel\.c|sine_53_coeff_source\.c)$'
-          deleted_root=0
+          deleted=0
           while IFS= read -r -d '' f; do
             b="${f#./}"
             if [[ ! "$b" =~ $keep_re ]]; then
               echo "DELETE_ROOT $b"
               rm -f -- "$f"
-              deleted_root=$((deleted_root+1))
+              deleted=$((deleted+1))
             fi
           done < <(find . -maxdepth 1 -type f \( -iname '*sine_53*' -o -iname '*sine53*' -o -iname '*s53*' \) -print0)
-
-          deleted_wf=0
-          while IFS= read -r -d '' f; do
-            b="$(basename "$f")"
-            if [[ "$b" != "sine-53-production-final-9600-6973pc.yml" ]]; then
-              echo "DELETE_WORKFLOW $f"
-              rm -f -- "$f"
-              deleted_wf=$((deleted_wf+1))
-            fi
-          done < <(find .github/workflows -maxdepth 1 -type f -name 'sine-53-*.yml' -print0)
-
-          echo "DELETED_ROOT=$deleted_root"
-          echo "DELETED_WORKFLOWS=$deleted_wf"
-          echo 'REMAINING_SINE53_FILES:'
+          echo "DELETED_ROOT=$deleted"
+          echo 'REMAINING_SINE53_ROOT:'
           find . -maxdepth 1 -type f \( -iname '*sine_53*' -o -iname '*sine53*' -o -iname '*s53*' \) -printf '%f\n' | sort
-          echo 'REMAINING_SINE53_WORKFLOWS:'
-          find .github/workflows -maxdepth 1 -type f -name 'sine-53-*.yml' -printf '%f\n' | sort
-
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add -A
           git status --short
-          git commit -m 'Clean sine53 to frozen X50+X67 production'
+          git commit -m 'Clean sine53 root to frozen X50+X67 production'
           git push origin HEAD:sine53-xeon-tuned-v2
