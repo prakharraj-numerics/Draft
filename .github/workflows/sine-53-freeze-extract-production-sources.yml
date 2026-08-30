@@ -1,0 +1,48 @@
+name: Sine53 freeze extract production sources
+on:
+  workflow_dispatch:
+  push:
+    branches: [sine53-xeon-tuned-v2]
+    paths: ['.github/workflows/sine-53-freeze-extract-production-sources.yml']
+permissions:
+  contents: read
+jobs:
+  extract:
+    runs-on: ubuntu-24.04
+    env:
+      OLD_X50_COMMIT: d55da61a682d2a7a108388c4a2199eef1810f6bb
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install generator dependency
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends python3-mpmath
+      - name: Generate exact frozen sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin "$OLD_X50_COMMIT"
+          rm -rf /tmp/x50old /tmp/frozen-src
+          git worktree add --detach /tmp/x50old FETCH_HEAD
+          cd /tmp/x50old
+          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
+          python3 make_sine_53_xeon_x50_x53_hw_campaign.py
+          mkdir -p /tmp/frozen-src
+          cp bench_sine_53_xeon_x50_build.c /tmp/frozen-src/sine53_x50_unit_production.c
+
+          cd "$GITHUB_WORKSPACE"
+          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
+          python3 make_sine_53_x67_compensated_grouped_final.py
+          cp bench_sine_53_xeon_x67_build.c /tmp/frozen-src/sine53_x67_wide_production.c
+          sha256sum /tmp/frozen-src/*.c | tee /tmp/frozen-src/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sine53-frozen-production-sources
+          path: /tmp/frozen-src
+          if-no-files-found: error
