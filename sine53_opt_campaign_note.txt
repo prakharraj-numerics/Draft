@@ -1,1 +1,0 @@
-Sine53 Xeon optimization campaign: preserve exact Mode-5/secant spine. Variants will be benchmarked separately against v12 and oneMKL VML_HA on the same eligible Intel AVX-512 host. No minimax/refit/SVML substitution.
