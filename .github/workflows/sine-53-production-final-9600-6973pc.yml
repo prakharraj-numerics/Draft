@@ -1,5 +1,7 @@
 name: Sine53 production final 9600 6973P-C
 on:
+  push:
+    branches: [ sine53-xeon-tuned-v2 ]
   workflow_dispatch:
 jobs:
   benchmark:
