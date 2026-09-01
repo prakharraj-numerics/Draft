@@ -2,21 +2,31 @@
 
 Current production routing is frozen as:
 
-- `n < 5000`: current SINE53 evaluator
-- `n >= 5000`: frozen custom permanent 2-core scheduler
+- `n < 2000`: current SINE53 evaluator
+- `n >= 2000`: frozen custom permanent 2-core scheduler
 
-The routing is backed by the exact Intel Xeon 6973P-C three-way benchmark:
+The final threshold is backed by exact Intel Xeon 6973P-C three-way benchmarks.
+
+Focused boundary evidence:
+
+- run `33567930913`
+- exact-Xeon shard `50`
+- at `n=1500`, current SINE53 remained faster on the six-case average
+- at every tested size from `n=2000` through `n=4500`, custom2 beat current SINE53 in all six requested sign/range cells
+- custom2 was bit-identical to current SINE53 on the boundary grid
+
+Broad large-batch evidence:
 
 - run `33567193984`
 - exact-Xeon shards `37` and `25`
-
-Across both exact-Xeon artifacts, custom2 was bit-identical to the current SINE53 evaluator over all 72 requested cells. At every tested point from 5,000 through 4,000,000, custom2 beat current SINE53 in all six requested sign/range cases on both shards. At 1,200, current SINE53 remained faster than custom2, so no lower crossover is inferred from this benchmark.
+- at every tested size from `n=5000` through `n=4000000`, custom2 beat current SINE53 in all six requested sign/range cells on both shards
+- custom2 was bit-identical to current SINE53 over the tested cells
 
 Frozen production files:
 
 - `sine53_batch_production.hpp`
-- `sine53_custom_2core_5000_frozen.hpp`
+- `sine53_custom_2core_2000_frozen.hpp`
 
-The experimental `sine53_custom_2core.hpp` remains available for research but is not the frozen production scheduler.
+Historical `sine53_custom_2core_5000_frozen.hpp` is retained as the previous freeze record. The experimental `sine53_custom_2core.hpp` remains available for research but is not the frozen production scheduler.
 
-Do not change the 5,000 threshold or frozen scheduler without a new benchmark and explicit production promotion.
+Do not change the 2,000 threshold or frozen scheduler without a new benchmark and explicit production promotion.
