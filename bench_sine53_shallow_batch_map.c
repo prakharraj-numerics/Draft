@@ -170,3 +170,5 @@ int main(void)
     flint_cleanup_master();
     return 0;
 }
+
+/* Xeon lottery rerun: benchmark protocol unchanged. */
