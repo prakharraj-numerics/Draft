@@ -1,0 +1,207 @@
+name: Sine53 shallow batch map vs Intel HA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'bench_sine53_shallow_batch_map.c'
+      - '.github/workflows/sine53-shallow-batch-map-xeon.yml'
+      - 'sine53_production_inject_unit3200.py'
+      - 'sine53_production_inject_wide3200.py'
+      - 'sine53_x50_unit_production.c'
+      - 'sine53_x67_wide_production.c'
+
+jobs:
+  bench:
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 64
+      matrix:
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64]
+    runs-on: ubuntu-24.04
+    env:
+      FLINT_PREFIX: /home/runner/flint36
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require exact Intel Xeon 6973P-C + AVX-512
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL="$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          echo "CPU_MODEL=$MODEL"
+          lscpu -e=CPU,CORE,SOCKET,NODE,ONLINE || true
+          if [[ "$MODEL" == *"6973P-C"* ]] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f; then
+            echo eligible=1 >> "$GITHUB_OUTPUT"
+            echo "ELIGIBLE_XEON_6973PC=1 slot=${{ matrix.slot }}"
+          else
+            echo eligible=0 >> "$GITHUB_OUTPUT"
+            echo "SKIP_NON_6973PC slot=${{ matrix.slot }}"
+          fi
+
+      - name: Base packages
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \( -iname '*microsoft*' -o -iname '*azure*' \) -delete || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential binutils libgmp-dev libmpfr-dev python3 curl xz-utils gpg-agent wget ca-certificates
+
+      - name: Restore Intel oneAPI
+        if: steps.gate.outputs.eligible == '1'
+        id: oneapi
+        uses: actions/cache@v4
+        with:
+          path: /opt/intel/oneapi
+          key: intel-oneapi-prof3-intel-2026.1.0-236-2026.1.1-325-v1
+
+      - name: Install Intel oneAPI on cache miss
+        if: steps.gate.outputs.eligible == '1' && steps.oneapi.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg >/dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main' | sudo tee /etc/apt/sources.list.d/oneAPI.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends intel-oneapi-mkl-devel intel-oneapi-compiler-dpcpp-cpp
+
+      - name: Restore FLINT 3.6.0
+        if: steps.gate.outputs.eligible == '1'
+        id: flint
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/flint36
+          key: flint-3.6.0-ubuntu24-x86_64-native-cd49f6116fb977da331dbb6627f4998397730a62253bd7a70a201ad5a00576d7-v2
+
+      - name: Install FLINT on cache miss
+        if: steps.gate.outputs.eligible == '1' && steps.flint.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 -o /tmp/flint.tar.xz https://github.com/flintlib/flint/releases/download/v3.6.0/flint-3.6.0.tar.xz
+          echo '134d39731a6dd926254625d646d85bf5990c68a3f2326cd54d2a6983e3e11dd8  /tmp/flint.tar.xz' | sha256sum -c -
+          tar -xf /tmp/flint.tar.xz -C /tmp
+          cd /tmp/flint-3.6.0
+          CFLAGS='-O3 -march=native -DNDEBUG' ./configure --prefix="$FLINT_PREFIX"
+          make -j2 >/dev/null
+          make install >/dev/null
+
+      - name: Generate production X50 and X67 translation units
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(sha256sum sine53_x50_unit_production.c | awk '{print $1}')" = "ba79230dc0154f198129b21eb87fd0f96de0457e0a7f08f6e78ec2d29dd1806c"
+          test "$(sha256sum sine53_x67_wide_production.c | awk '{print $1}')" = "586fcc695a06a855ab0c59a8bc791618685d4fcbabdf459b56ccd6c0b9190c5c"
+
+          curl -fsSL https://raw.githubusercontent.com/prakharraj-numerics/Draft/backup-pre-cleanup-20260830/bench_sine_53_wide_fast2.c -o bench_sine_53_wide_fast2.c
+          curl -fsSL https://raw.githubusercontent.com/prakharraj-numerics/Draft/backup-pre-cleanup-20260830/bench_sine_53_wide_intel.c -o bench_sine_53_wide_intel.c
+          curl -fsSL https://raw.githubusercontent.com/prakharraj-numerics/Draft/backup-pre-cleanup-20260830/sine_53_coeff_source.c -o sine_53_coeff_source.c
+          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
+
+          cp sine53_x50_unit_production.c generated_x50.c
+          python3 sine53_production_inject_unit3200.py generated_x50.c
+          cp sine53_x67_wide_production.c generated_x67.c
+          python3 sine53_production_inject_wide3200.py generated_x67.c
+
+          python3 - <<'PY'
+          from pathlib import Path
+          for name in ('generated_x50.c','generated_x67.c'):
+              p=Path(name); s=p.read_text()
+              needle='int main(void){'
+              if s.count(needle)!=1:
+                  raise SystemExit(f'{name}: expected one injected main, got {s.count(needle)}')
+              p.write_text(s.replace(needle,'int sine53_embedded_main(void){',1))
+          PY
+
+      - name: Build shallow batch benchmark
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/sine53-shallow
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          CC=/opt/intel/oneapi/compiler/latest/bin/icx
+          INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
+          LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
+          COMMON='-O3 -xHost -fp-model=precise'
+
+          "$CC" $COMMON $INC -DSINE53_GENERATED_SOURCE='"generated_x50.c"' -DSHALLOW_ENGINE_WIDE=0 \
+            bench_sine53_shallow_batch_map.c -o /tmp/sine53-shallow/unit $LIBS
+          "$CC" $COMMON $INC -DSINE53_GENERATED_SOURCE='"generated_x67.c"' -DSHALLOW_ENGINE_WIDE=1 \
+            bench_sine53_shallow_batch_map.c -o /tmp/sine53-shallow/wide $LIBS
+
+          {
+            echo "CPU=$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+            echo "SLOT=${{ matrix.slot }}"
+            echo "HEAD=$(git rev-parse HEAD)"
+            echo "SIZES=50,250,1200,5000,10000,30000,50000,100000,500000,1000000,2000000,4000000"
+            echo "BATCHES_PER_SIZE=6 unit_pos,unit_neg,mid_pos,mid_neg,far_pos,far_neg"
+            echo "RANGES=0<abs(x)<1;1<abs(x)<500;1000<abs(x)<10000"
+            echo "ENGINES=X50_unit_for_unit;X67_wide_for_mid_and_far"
+            echo "INTEL=oneMKL_vmdSin_VML_HA_sequential"
+            "$CC" --version | head -1
+          } | tee /tmp/sine53-shallow/build.txt
+
+      - name: Run shallow batch map
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        env:
+          MKL_NUM_THREADS: '1'
+          OMP_NUM_THREADS: '1'
+        run: |
+          set -euo pipefail
+          RAW=/tmp/sine53-shallow/raw.txt
+          OUT=/tmp/sine53-shallow/results.txt
+          : > "$RAW"
+          cat /tmp/sine53-shallow/build.txt | tee "$OUT"
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:/opt/intel/oneapi/mkl/latest/lib:${LD_LIBRARY_PATH:-}"
+          taskset -c 0 /tmp/sine53-shallow/unit | tee -a "$RAW"
+          taskset -c 0 /tmp/sine53-shallow/wide | tee -a "$RAW"
+
+          python3 - <<'PY' | tee -a "$OUT"
+          import re
+          sizes=[50,250,1200,5000,10000,30000,50000,100000,500000,1000000,2000000,4000000]
+          cases=['unit_pos','unit_neg','mid_pos','mid_neg','far_pos','far_neg']
+          p=re.compile(r'RESULT n=(\d+) case=(\w+) reps=(\d+) ours_ns=([0-9.]+) intel_ns=([0-9.]+) intel_over_ours=([0-9.]+) winner=(OURS|INTEL)')
+          d={}
+          for line in open('/tmp/sine53-shallow/raw.txt'):
+              m=p.search(line)
+              if m:
+                  d[(int(m.group(1)),m.group(2))]=(float(m.group(4)),float(m.group(5)),float(m.group(6)),m.group(7))
+          missing=[(n,c) for n in sizes for c in cases if (n,c) not in d]
+          if missing: raise SystemExit(f'missing results: {missing}')
+          wins=0
+          for n in sizes:
+              vals=[d[(n,c)] for c in cases]
+              wins += sum(v[3]=='OURS' for v in vals)
+              def pair(i,j):
+                  oo=(vals[i][0]+vals[j][0])/2
+                  ii=(vals[i][1]+vals[j][1])/2
+                  return oo,ii,ii/oo
+              u=pair(0,1); m=pair(2,3); f=pair(4,5)
+              ao=sum(v[0] for v in vals)/6
+              ai=sum(v[1] for v in vals)/6
+              print(f'SUMMARY n={n} unit_ours={u[0]:.9f} unit_intel={u[1]:.9f} unit_speedup={u[2]:.6f} mid_ours={m[0]:.9f} mid_intel={m[1]:.9f} mid_speedup={m[2]:.6f} far_ours={f[0]:.9f} far_intel={f[1]:.9f} far_speedup={f[2]:.6f} all6_ours={ao:.9f} all6_intel={ai:.9f} all6_speedup={ai/ao:.6f}')
+              for c in cases:
+                  o,i,s,w=d[(n,c)]
+                  print(f'CELL n={n} case={c} ours={o:.9f} intel={i:.9f} speedup={s:.6f} winner={w}')
+          print(f'OVERALL ours_wins={wins}/{len(sizes)*len(cases)}')
+          PY
+
+      - name: Upload Xeon result
+        if: steps.gate.outputs.eligible == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sine53-shallow-batch-map-${{ matrix.slot }}
+          path: /tmp/sine53-shallow
+          if-no-files-found: error
