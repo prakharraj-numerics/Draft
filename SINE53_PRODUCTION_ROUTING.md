@@ -2,12 +2,20 @@
 
 Current production routing is frozen as:
 
-- `n < 2000`: current SINE53 evaluator
-- `n >= 2000`: frozen custom permanent 2-core scheduler
+- `n < 1600`: current SINE53 evaluator
+- `n >= 1600`: frozen custom permanent 2-core scheduler
 
 The final threshold is backed by exact Intel Xeon 6973P-C three-way benchmarks.
 
-Focused boundary evidence:
+Focused 1600-1900 evidence:
+
+- run `33568489785`
+- exact-Xeon shard `61`
+- at every tested size from `n=1600` through `n=1900`, custom2 beat current SINE53 in all six requested sign/range cells
+- custom2 was bit-identical to current SINE53 on the tested grid
+- at `n=1600`, the all-six average advantage over current was about 2.31%, increasing through the tested range
+
+Earlier boundary evidence:
 
 - run `33567930913`
 - exact-Xeon shard `50`
@@ -25,8 +33,8 @@ Broad large-batch evidence:
 Frozen production files:
 
 - `sine53_batch_production.hpp`
-- `sine53_custom_2core_2000_frozen.hpp`
+- `sine53_custom_2core_1600_frozen.hpp`
 
-Historical `sine53_custom_2core_5000_frozen.hpp` is retained as the previous freeze record. The experimental `sine53_custom_2core.hpp` remains available for research but is not the frozen production scheduler.
+Historical `sine53_custom_2core_2000_frozen.hpp` and `sine53_custom_2core_5000_frozen.hpp` are retained as previous freeze records. The experimental `sine53_custom_2core.hpp` remains available for research but is not the frozen production scheduler.
 
-Do not change the 2,000 threshold or frozen scheduler without a new benchmark and explicit production promotion.
+Do not change the 1,600 threshold or frozen scheduler without a new benchmark and explicit production promotion.
