@@ -4,32 +4,36 @@
 
    Routing rule frozen from exact Intel Xeon 6973P-C benchmark evidence:
 
-       n < 5000   -> current SINE53 evaluator
-       n >= 5000  -> frozen custom permanent 2-core scheduler
+       n < 2000   -> current SINE53 evaluator
+       n >= 2000  -> frozen custom permanent 2-core scheduler
 
    Evidence:
-     GitHub Actions run 33567193984, exact Xeon shards 37 and 25.
+     Focused boundary run 33567930913, exact Xeon shard 50:
+       - n=1500: current SINE53 remained faster on the six-case average
+       - n=2000 through 4500: custom2 beat current in all six requested
+         sign/range cells at every tested size
+       - custom2 remained bit-identical to current on the boundary grid
 
-     custom2 was bit-identical to current SINE53 over all 72 requested cells on
-     both exact-Xeon artifacts. At every tested point from n=5000 through
-     n=4000000, custom2 beat current SINE53 in all six sign/range cells on both
-     shards. At n=1200, current SINE53 was still faster than custom2.
+     Broad run 33567193984, exact Xeon shards 37 and 25:
+       - n=5000 through 4000000: custom2 beat current in all six requested
+         sign/range cells at every tested size on both shards
+       - custom2 remained bit-identical to current over the tested cells
 
    This dispatcher changes scheduling only. The supplied evaluator remains the
    same current SINE53 implementation (X50/X67 routing is external to this
    scheduler and remains unchanged).
 
-   FROZEN: do not change the 5000 threshold or scheduler in this file without a
+   FROZEN: do not change the 2000 threshold or scheduler in this file without a
    new benchmark and an explicit production promotion.
 */
 
 #include <cstddef>
-#include "sine53_custom_2core_5000_frozen.hpp"
+#include "sine53_custom_2core_2000_frozen.hpp"
 
 class Sine53BatchProductionFrozen {
 public:
     using fn_t = void (*)(double *, const double *, size_t);
-    static constexpr size_t kCustom2MinN = 5000;
+    static constexpr size_t kCustom2MinN = 2000;
 
     explicit Sine53BatchProductionFrozen(fn_t current_eval)
         : current_eval_(current_eval), custom2_(current_eval) {}
@@ -47,5 +51,5 @@ public:
 
 private:
     fn_t current_eval_;
-    Sine53CustomPermanent2Core5000Frozen custom2_;
+    Sine53CustomPermanent2Core2000Frozen custom2_;
 };
