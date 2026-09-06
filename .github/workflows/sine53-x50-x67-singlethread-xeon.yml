@@ -8,10 +8,6 @@ on:
 
 jobs:
   benchmark:
-    strategy:
-      fail-fast: false
-      matrix:
-        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
     runs-on: ubuntu-24.04
     env:
       FLINT_PREFIX: /home/runner/flint36
@@ -122,6 +118,6 @@ jobs:
         if: steps.gate.outputs.eligible == '1'
         uses: actions/upload-artifact@v4
         with:
-          name: sine53-x50-x67-singlethread-xeon-${{ matrix.slot }}
+          name: sine53-x50-x67-singlethread-xeon
           path: /tmp/s53-singlethread
           if-no-files-found: ignore
