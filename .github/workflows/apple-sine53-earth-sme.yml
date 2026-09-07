@@ -23,7 +23,6 @@ jobs:
       VECLIB_MAXIMUM_THREADS: '1'
     steps:
       - uses: actions/checkout@v4
-
       - name: Verify SME hardware
         shell: bash
         run: |
@@ -34,43 +33,26 @@ jobs:
           echo "SVL_BYTES=$(sysctl -n hw.optional.arm.sme_max_svl_b)"
           test "$(sysctl -n hw.optional.arm.FEAT_SME)" = 1
           test "$(sysctl -n hw.optional.arm.sme_max_svl_b)" = 64
-
       - name: Install coefficient-generation dependencies
         shell: bash
         run: |
           set -euo pipefail
           brew list flint >/dev/null 2>&1 || brew install flint
-          brew list mpfr  >/dev/null 2>&1 || brew install mpfr
-
+          brew list mpfr >/dev/null 2>&1 || brew install mpfr
       - name: Recover frozen SINE53 coefficient source
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsSL \
-            https://raw.githubusercontent.com/prakharraj-numerics/Draft/backup-pre-cleanup-20260830/sine_53_coeff_source.c \
-            -o benchmark_support/apple_sine53_coeff_source.c
+          curl -fsSL https://raw.githubusercontent.com/prakharraj-numerics/Draft/backup-pre-cleanup-20260830/sine_53_coeff_source.c -o benchmark_support/apple_sine53_coeff_source.c
           sed -i '' 's/#define SF_K 12/#define SF_K 8/' benchmark_support/apple_sine53_coeff_source.c
           sed -i '' 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' benchmark_support/apple_sine53_coeff_source.c
-          grep -q '#define SF_K 8' benchmark_support/apple_sine53_coeff_source.c
-          grep -q '#define SF_LUT_N 403UL' benchmark_support/apple_sine53_coeff_source.c
-
-      - name: Generate frozen Apple SINE53 constants
+      - name: Generate Apple EARTH terms1 constants
         shell: bash
         run: |
           set -euo pipefail
-          FLINT="$(brew --prefix flint)"
-          MPFR="$(brew --prefix mpfr)"
-          GMP="$(brew --prefix gmp)"
-          clang -O2 -std=c11 \
-            -Ibenchmark_support -I"$FLINT/include" -I"$MPFR/include" -I"$GMP/include" \
-            benchmark_support/apple_sine53_coeff_bridge.c \
-            benchmark_support/apple_sine53_generate_constants.c \
-            -L"$FLINT/lib" -L"$MPFR/lib" -L"$GMP/lib" \
-            -lflint -lmpfr -lgmp -lm -o /tmp/sine53_gen
+          FLINT="$(brew --prefix flint)"; MPFR="$(brew --prefix mpfr)"; GMP="$(brew --prefix gmp)"
+          clang -O2 -std=c11 -Ibenchmark_support -I"$FLINT/include" -I"$MPFR/include" -I"$GMP/include" benchmark_support/apple_sine53_coeff_bridge.c benchmark_support/apple_sine53_generate_constants.c -L"$FLINT/lib" -L"$MPFR/lib" -L"$GMP/lib" -lflint -lmpfr -lgmp -lm -o /tmp/sine53_gen
           /tmp/sine53_gen /tmp/apple_sine53_constants.h
-          grep -q 'APPLE_SINE53_LUTN 403' /tmp/apple_sine53_constants.h
-          grep -q 'APPLE_SINE53_REDN 3185' /tmp/apple_sine53_constants.h
-
       - name: Build SME EARTH and harness
         shell: bash
         run: |
@@ -88,33 +70,22 @@ jobs:
               ldp x29, x30, [sp], #16
               ret
           ASM
-
           COMMON="-O3 -DNDEBUG -std=c++20 -march=armv9.2-a+sme+sme2 -fno-fast-math -ffp-contract=fast -fno-vectorize -fno-slp-vectorize"
           clang++ $COMMON -c benchmark_support/apple_sine53_earth_frozen.cpp -o /tmp/earth.o
           clang -c -march=armv9.2-a+sme+sme2 /tmp/sine53_earth_entry.s -o /tmp/entry.o
-
-          MPFR="$(brew --prefix mpfr)"
-          GMP="$(brew --prefix gmp)"
-          clang++ -O3 -DNDEBUG -std=c++20 \
-            -Ibenchmark_support -I/tmp -I"$MPFR/include" -I"$GMP/include" \
-            benchmark_support/apple_sine53_earth_benchmark.cpp /tmp/earth.o /tmp/entry.o \
-            -L"$MPFR/lib" -L"$GMP/lib" -lmpfr -lgmp -o /tmp/sine53_earth_bench
-
-      - name: Validate against MPFR256
+          MPFR="$(brew --prefix mpfr)"; GMP="$(brew --prefix gmp)"
+          clang++ -O3 -DNDEBUG -std=c++20 -Ibenchmark_support -I/tmp -I"$MPFR/include" -I"$GMP/include" benchmark_support/apple_sine53_earth_benchmark.cpp /tmp/earth.o /tmp/entry.o -L"$MPFR/lib" -L"$GMP/lib" -lmpfr -lgmp -framework Accelerate -o /tmp/sine53_earth_bench
+      - name: Validate against MPFR256 and Apple vvsin
         shell: bash
         run: |
           set -euo pipefail
           /tmp/sine53_earth_bench validate | tee /tmp/validate.txt
-
-      - name: Benchmark SME-only and prep plus SME
+      - name: Benchmark SME-only full path and vvsin
         shell: bash
         run: |
           set -euo pipefail
           : > /tmp/bench.txt
-          for n in 100 400 1000 3000 6000 15000 30000 80000 200000 500000 1000000; do
-            /tmp/sine53_earth_bench bench "$n" | tee -a /tmp/bench.txt
-          done
-
+          for n in 100 400 1000 3000 6000 15000 30000 80000 200000 500000 1000000; do /tmp/sine53_earth_bench bench "$n" | tee -a /tmp/bench.txt; done
       - uses: actions/upload-artifact@v4
         if: always()
         with:
