@@ -7,111 +7,115 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
+#include <cstring>
 
-/* Genuine preparation front-end for the Apple SINE53 EARTH SME kernel.
+/* Literal sine transfer of the frozen COS53 PLUTO/EARTH front-end.
  *
- * Streams produced for apple_sine53_earth_frozen.cpp:
- *   delta[i]    local displacement from the 1/256 anchor
- *   c0[i]       sin(anchor)
- *   c1[i]       cos(anchor)
- *   signbits[i] bit 0 = final sign of sin(x)
+ * Preserved from cosine:
+ *   INVPI, KGRID=1280, split reciprocal, PI_P1/PI_P2 reduction,
+ *   2^52 magic rounding for q and j, 2009-entry AoS LUT contract.
  *
- * Reduction follows the proven Apple COS53 nearest-pi scheme:
- *   q  = nearest(|x|/pi)
- *   r  = |x| - q*pi using a hi/lo q*pi table
- *   rr = |r|
- *   j  = nearest(rr*256)
- *   d  = rr - j/256
+ * The cosine AoS table stores (cos(a), -sin(a)).  Therefore the sine
+ * cubic coefficients at the same anchor are obtained without regeneration:
+ *   sine c0 =  sin(a) = -cosine_c1
+ *   sine c1 =  cos(a) =  cosine_c0
  *
- * Because sin(x)=(-1)^q sin(r) and sin is odd, final sign is
- *   sign(x) XOR (q&1) XOR (r<0).
+ * Sine's final sign is sign(x) XOR q-parity XOR sign(reduced residual).
+ * Rare j>=2009 lanes use the same scalar-repair philosophy as frozen cosine.
  */
 
 namespace apple_sine53_earth {
 
-static constexpr double kInvPi = 0x1.45f306dc9c883p-2;
-static constexpr double kGrid = 256.0;
-static constexpr double kInvGrid = 1.0 / 256.0;
+static constexpr double INVPI = 0x1.45f306dc9c883p-2;
+static constexpr double KGRID = 1280.0;
+static constexpr double NINVK_HI = -0x1.999999999999ap-11;
+static constexpr double NINVK_LO =  0x1.999999999999ap-65;
+static constexpr double PI_P1 = 0x1.921fb54442000p+1;
+static constexpr double PI_P2 = 0x1.a308d313198a3p-40;
+static constexpr double MAGIC = 0x1p52;
+static constexpr std::size_t LUTN = 2009;
+static constexpr std::uint64_t JMASK = (UINT64_C(1) << 52) - 1;
 
 struct PrepareTables {
-    const double* sin_tab;
-    const double* cos_tab;
+    const double* cosine_aos; // [cos(a0),-sin(a0), cos(a1),-sin(a1), ...]
     std::size_t lutn;
-    const double* pih;
-    const double* pil;
-    std::size_t redn;
 };
 
-static inline void exact_two_sum(double a, double b,
-                                 double& hi, double& lo) noexcept {
-    hi = a + b;
-    const double bv = hi - a;
-    const double av = hi - bv;
-    const double br = b - bv;
-    const double ar = a - av;
-    lo = ar + br;
+static inline std::uint64_t bits(double x) noexcept {
+    std::uint64_t u;
+    std::memcpy(&u, &x, sizeof(u));
+    return u;
 }
 
 static inline std::size_t prepare(const double* x,
                                   std::size_t n,
-                                  const PrepareTables& t,
+                                  const PrepareTables& tab,
                                   double* delta,
                                   double* c0,
                                   double* c1,
                                   std::uint64_t* signbits) noexcept {
-    std::size_t bad = 0;
+    std::size_t repairs = 0;
+    constexpr std::uint64_t SIGN = UINT64_C(0x8000000000000000);
 
     for (std::size_t i = 0; i < n; ++i) {
         const double xi = x[i];
-        const bool input_neg = std::signbit(xi);
+        const std::uint64_t xsign = bits(xi) & SIGN;
         const double ax = std::fabs(xi);
 
         if (!std::isfinite(ax)) {
-            ++bad;
-            delta[i] = c0[i] = c1[i] = std::numeric_limits<double>::quiet_NaN();
+            ++repairs;
+            delta[i] = 0.0;
+            c0[i] = std::sin(xi);
+            c1[i] = 0.0;
             signbits[i] = 0;
             continue;
         }
 
-        const long long qll = std::llrint(ax * kInvPi);
-        if (qll < 0 || static_cast<std::size_t>(qll) >= t.redn) {
-            ++bad;
-            delta[i] = c0[i] = c1[i] = std::numeric_limits<double>::quiet_NaN();
+        const double qscaled = ax * INVPI;
+        const double qmagic = qscaled + MAGIC;
+        const double qd = qmagic - MAGIC;
+        const std::uint64_t qbits = bits(qmagic);
+
+        const double qp1 = qd * PI_P1;
+        const double t = ax - qp1;
+        const double rh = std::fma(qd, -PI_P2, t);
+        const double d = t - rh;
+        const double rl = std::fma(qd, -PI_P2, d);
+
+        const std::uint64_t rsign = bits(rh) & SIGN;
+        const double ah = std::fabs(rh);
+        const double al = rsign ? -rl : rl;
+
+        const double jscaled = ah * KGRID;
+        const double jmagic = jscaled + MAGIC;
+        const double jd = jmagic - MAGIC;
+        const std::uint64_t j = bits(jmagic) & JMASK;
+
+        if (j >= tab.lutn) {
+            // Same rare scalar repair as the frozen cosine PLUTO path.
+            ++repairs;
+            delta[i] = 0.0;
+            c0[i] = std::sin(xi);
+            c1[i] = 0.0;
             signbits[i] = 0;
             continue;
         }
-        const std::size_t q = static_cast<std::size_t>(qll);
 
-        const double s = ax - t.pih[q];
-        const double b = -t.pil[q];
-        double rh, rl;
-        exact_two_sum(s, b, rh, rl);
+        double de = std::fma(jd, NINVK_HI, ah);
+        de = std::fma(jd, NINVK_LO, de);
+        de += al;
+        delta[i] = de;
 
-        const double rs = rh + rl;
-        const bool residual_neg = std::signbit(rs) && rs != 0.0;
-        if (residual_neg) {
-            rh = -rh;
-            rl = -rl;
-        }
-        const double rr = rh + rl;
+        const double cos_c0 = tab.cosine_aos[2*j + 0];
+        const double cos_c1 = tab.cosine_aos[2*j + 1];
+        c0[i] = -cos_c1; // sin(anchor)
+        c1[i] =  cos_c0; // cos(anchor)
 
-        long long jll = std::llrint(rr * kGrid);
-        if (jll < 0) jll = 0;
-        if (static_cast<std::size_t>(jll) >= t.lutn)
-            jll = static_cast<long long>(t.lutn - 1);
-        const std::size_t j = static_cast<std::size_t>(jll);
-
-        const double jd = static_cast<double>(jll);
-        delta[i] = (rh - jd * kInvGrid) + rl;
-        c0[i] = t.sin_tab[j];
-        c1[i] = t.cos_tab[j];
-        signbits[i] = static_cast<std::uint64_t>(input_neg ^
-                                                 ((q & 1u) != 0) ^
-                                                 residual_neg);
+        const std::uint64_t parity = qbits & UINT64_C(1);
+        signbits[i] = ((xsign != 0) ^ (parity != 0) ^ (rsign != 0)) ? 1u : 0u;
     }
 
-    return bad;
+    return repairs;
 }
 
 } // namespace apple_sine53_earth
