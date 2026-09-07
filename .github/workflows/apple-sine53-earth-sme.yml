@@ -8,18 +8,14 @@ on:
       - '.github/workflows/apple-sine53-earth-sme.yml'
       - 'benchmark_support/apple_sine53_earth_frozen.cpp'
       - 'benchmark_support/apple_sine53_earth_prepare.hpp'
-      - 'benchmark_support/apple_sine53_coeff_bridge.c'
-      - 'benchmark_support/apple_sine53_generate_constants.c'
       - 'benchmark_support/apple_sine53_earth_benchmark.cpp'
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   validate-bench:
-    # Namespace.so macOS arm64 pool. This exact class has resolved to M4 Pro
-    # for the successful COS53 EARTH SME runs; the hardware gate below also
-    # refuses any Apple M generation older than M4.
     runs-on: nscloud-macos-tahoe-arm64-6x14
     timeout-minutes: 30
     env:
@@ -28,8 +24,6 @@ jobs:
       HOMEBREW_NO_INSTALL_CLEANUP: '1'
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
       - name: Verify Namespace M4+ SME hardware
         shell: bash
@@ -48,39 +42,30 @@ jobs:
           test "$(sysctl -n hw.optional.arm.FEAT_SME2)" = 1
           test "$(sysctl -n hw.optional.arm.sme_max_svl_b)" = 64
 
-      - name: Install coefficient-generation dependencies
+      - name: Install MPFR validation dependency
         shell: bash
         run: |
           set -euo pipefail
-          brew list flint >/dev/null 2>&1 || brew install flint
           brew list mpfr >/dev/null 2>&1 || brew install mpfr
 
-      - name: Recover frozen SINE53 coefficient source
+      - name: Fetch exact frozen COS53 PLUTO K1280 coefficient table
+        uses: actions/download-artifact@v4
+        with:
+          name: pluto-m4-generated-source
+          path: /tmp/pluto-art
+          github-token: ${{ github.token }}
+          repository: prakharraj-numerics/Draft-cosine
+          run-id: '34051479551'
+
+      - name: Verify frozen PLUTO table contract
         shell: bash
         run: |
           set -euo pipefail
-          # Repo is private: use checkout's authenticated git credentials rather
-          # than unauthenticated raw.githubusercontent.com, which returns 404.
-          git fetch --no-tags --depth=1 origin \
-            refs/heads/backup-pre-cleanup-20260830:refs/remotes/origin/backup-pre-cleanup-20260830
-          git show origin/backup-pre-cleanup-20260830:sine_53_coeff_source.c \
-            > benchmark_support/apple_sine53_coeff_source.c
-          sed -i '' 's/#define SF_K 12/#define SF_K 8/' benchmark_support/apple_sine53_coeff_source.c
-          sed -i '' 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' benchmark_support/apple_sine53_coeff_source.c
-          grep -q '#define SF_K 8' benchmark_support/apple_sine53_coeff_source.c
-          grep -q '#define SF_LUT_N 403UL' benchmark_support/apple_sine53_coeff_source.c
+          test -f /tmp/pluto-art/apple_cos53_coeff_aos.h
+          grep -q 'OPT_COS53_LUTN' /tmp/pluto-art/apple_cos53_coeff_aos.h
+          grep -q 'opt_cos53_coeff_aos' /tmp/pluto-art/apple_cos53_coeff_aos.h
 
-      - name: Generate Apple EARTH terms1 constants
-        shell: bash
-        run: |
-          set -euo pipefail
-          FLINT="$(brew --prefix flint)"; MPFR="$(brew --prefix mpfr)"; GMP="$(brew --prefix gmp)"
-          clang -O2 -std=c11 -Ibenchmark_support -I"$FLINT/include" -I"$MPFR/include" -I"$GMP/include" benchmark_support/apple_sine53_coeff_bridge.c benchmark_support/apple_sine53_generate_constants.c -L"$FLINT/lib" -L"$MPFR/lib" -L"$GMP/lib" -lflint -lmpfr -lgmp -lm -o /tmp/sine53_gen
-          /tmp/sine53_gen /tmp/apple_sine53_constants.h
-          grep -q 'APPLE_SINE53_LUTN 403' /tmp/apple_sine53_constants.h
-          grep -q 'APPLE_SINE53_REDN 3185' /tmp/apple_sine53_constants.h
-
-      - name: Build SME EARTH and harness
+      - name: Build literal sine EARTH transfer
         shell: bash
         run: |
           set -euo pipefail
@@ -101,7 +86,7 @@ jobs:
           clang++ $COMMON -c benchmark_support/apple_sine53_earth_frozen.cpp -o /tmp/earth.o
           clang -c -march=armv9.2-a+sme+sme2 /tmp/sine53_earth_entry.s -o /tmp/entry.o
           MPFR="$(brew --prefix mpfr)"; GMP="$(brew --prefix gmp)"
-          clang++ -O3 -DNDEBUG -std=c++20 -Ibenchmark_support -I/tmp -I"$MPFR/include" -I"$GMP/include" benchmark_support/apple_sine53_earth_benchmark.cpp /tmp/earth.o /tmp/entry.o -L"$MPFR/lib" -L"$GMP/lib" -lmpfr -lgmp -framework Accelerate -o /tmp/sine53_earth_bench
+          clang++ -O3 -DNDEBUG -std=c++20 -Ibenchmark_support -I/tmp/pluto-art -I"$MPFR/include" -I"$GMP/include" benchmark_support/apple_sine53_earth_benchmark.cpp /tmp/earth.o /tmp/entry.o -L"$MPFR/lib" -L"$GMP/lib" -lmpfr -lgmp -framework Accelerate -o /tmp/sine53_earth_bench
 
       - name: Validate against MPFR256 and Apple vvsin
         shell: bash
@@ -109,7 +94,7 @@ jobs:
           set -euo pipefail
           /tmp/sine53_earth_bench validate | tee /tmp/validate.txt
 
-      - name: Benchmark SME-only full path and vvsin
+      - name: Benchmark SME hot stage full path and vvsin
         shell: bash
         run: |
           set -euo pipefail
