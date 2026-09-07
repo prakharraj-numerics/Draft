@@ -1,7 +1,20 @@
 // EARTH — direct sine transfer of frozen COS53 EARTH diagnostic kernel from run 34060621422
 // Source commit provenance: Draft-cosine 1ba471c9e612d7dd4a5149711e65c4e207f21a6f
-// Definition: precomputed delta/c0/c1/signbits + SME streaming Horner/sign only.
-// Structural rule: exact COS53 EARTH kernel; only cosine->sine semantics/naming changed.
+//
+// SME contract intentionally preserved from EARTH:
+//   - streaming mode
+//   - M4-class 64-byte SVL => 8 FP64 lanes
+//   - terms=1 / degree=3 cubic
+//   - identical tuned MH/M6 constants
+//   - identical Horner/FMA ordering
+//
+// Minimal cosine->sine semantic change:
+// COS53 EARTH's incoming anchor pair is (cos(a), -sin(a)).
+// For sine we need (sin(a), cos(a)), therefore per lane:
+//   s0 = -c1
+//   s1 =  c0
+// The final sign stream is supplied precomputed for sine; the SME sign-XOR
+// mechanism itself is unchanged.
 
 #include <arm_sve.h>
 #include <cstddef>
@@ -34,8 +47,14 @@ extern "C" void sine53_earth_stream(
         svbool_t pg = svwhilelt_b64((uint64_t)i, (uint64_t)n);
 
         svfloat64_t de = svld1_f64(pg, delta + i);
-        svfloat64_t a0 = svld1_f64(pg, c0 + i);
-        svfloat64_t a1 = svld1_f64(pg, c1 + i);
+
+        // Exact COS53 EARTH anchor streams, reinterpreted minimally for sine:
+        //   incoming c0 = cos(a), incoming c1 = -sin(a)
+        //   sine s0 = sin(a) = -c1, sine s1 = cos(a) = c0
+        svfloat64_t cos_a = svld1_f64(pg, c0 + i);
+        svfloat64_t neg_sin_a = svld1_f64(pg, c1 + i);
+        svfloat64_t a0 = svneg_f64_x(pg, neg_sin_a);
+        svfloat64_t a1 = cos_a;
 
         svfloat64_t c2 = svmul_n_f64_x(pg, a0, EARTH_MH);
         svfloat64_t c3 = svmul_n_f64_x(pg, a1, EARTH_M6);
