@@ -57,7 +57,7 @@ static int sde_mode(const std::string&stack,size_t n){
   unpin_current();mkl_set_num_threads_local(0);
   B b;if(!alloc(b,n))return 20;
   Sine53BatchProductionFrozen*prod=(stack=="ours")?new Sine53BatchProductionFrozen(sine53_engine_eval):nullptr;
-  run_once(stack,prod,b); // warm/init before measured region
+  if(stack!="noop") run_once(stack,prod,b); // warm/init before measured region
   sine53_profile_start();
   if(stack=="noop") { for(size_t j=0;j<b.x.size();++j) asm volatile("" : : "r"(b.x[j]),"r"(b.y[j]),"r"(b.n) : "memory"); }
   else run_once(stack,prod,b);
