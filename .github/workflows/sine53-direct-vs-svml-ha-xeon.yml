@@ -1,0 +1,291 @@
+name: SINE53 direct single-thread vs Intel SVML high-accuracy
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/sine53-direct-vs-svml-ha-xeon.yml'
+
+jobs:
+  benchmark:
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      max-parallel: 96
+      matrix:
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96]
+    runs-on: ubuntu-24.04
+    env:
+      FLINT_PREFIX: /home/runner/flint36
+      ONEAPI_CACHE_KEY: sine53-oneapi-compiler-mkl-ipp-svml-2026.1-v1
+      SDE_CACHE_KEY: intel-sde-10.13.1-2026-07-28-v1
+      MKL_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      VECLIB_MAXIMUM_THREADS: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require exact Intel Xeon 6973P-C + AVX-512 + CPU0
+        id: gate
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          MODEL="$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          VENDOR="$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          echo "CPU_MODEL=$MODEL VENDOR=$VENDOR SLOT=${{ matrix.slot }}"
+          if [[ "$VENDOR" == GenuineIntel && "$MODEL" == *"6973P-C"* ]] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f && taskset -c 0 true 2>/dev/null; then
+            echo eligible=1 >> "$GITHUB_OUTPUT"
+            echo "ELIGIBLE $MODEL slot=${{ matrix.slot }}"
+          else
+            echo eligible=0 >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Base packages + Intel repo
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \( -iname '*microsoft*' -o -iname '*azure*' \) -delete || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential binutils libgmp-dev libmpfr-dev python3 curl xz-utils wget ca-certificates gpg-agent
+          wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg >/dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main' | sudo tee /etc/apt/sources.list.d/oneAPI.list >/dev/null
+          sudo apt-get update -qq
+
+      - name: Restore proven Intel oneAPI cache
+        if: steps.gate.outputs.eligible == '1'
+        id: oneapi
+        uses: actions/cache@v4
+        with:
+          path: /opt/intel/oneapi
+          key: ${{ env.ONEAPI_CACHE_KEY }}
+
+      - name: Install compiler + MKL + IPP only on cache miss
+        if: steps.gate.outputs.eligible == '1' && steps.oneapi.outputs.cache-hit != 'true'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          sudo apt-get install -y --no-install-recommends intel-oneapi-compiler-dpcpp-cpp intel-oneapi-mkl-devel intel-oneapi-ipp-devel
+
+      - name: Verify Intel compiler toolchain
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          test -x /opt/intel/oneapi/compiler/latest/bin/icx
+          test -x /opt/intel/oneapi/compiler/latest/bin/icpx
+          test -f /opt/intel/oneapi/mkl/latest/include/mkl.h
+          /opt/intel/oneapi/compiler/latest/bin/icx --version
+
+      - name: Restore FLINT 3.6.0
+        if: steps.gate.outputs.eligible == '1'
+        id: flint
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/flint36
+          key: flint-3.6.0-ubuntu24-x86_64-native-cd49f6116fb977da331dbb6627f4998397730a62253bd7a70a201ad5a00576d7-v2
+
+      - name: Install FLINT only on cache miss
+        if: steps.gate.outputs.eligible == '1' && steps.flint.outputs.cache-hit != 'true'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          curl -L --fail --retry 3 -o /tmp/flint.tar.xz https://github.com/flintlib/flint/releases/download/v3.6.0/flint-3.6.0.tar.xz
+          echo '134d39731a6dd926254625d646d85bf5990c68a3f2326cd54d2a6983e3e11dd8  /tmp/flint.tar.xz' | sha256sum -c -
+          tar -xf /tmp/flint.tar.xz -C /tmp
+          cd /tmp/flint-3.6.0
+          CFLAGS='-O3 -march=native -DNDEBUG' ./configure --prefix="$FLINT_PREFIX"
+          make -j2 >/dev/null
+          make install >/dev/null
+
+      - name: Restore Intel SDE cache
+        if: steps.gate.outputs.eligible == '1'
+        id: sde
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/sdekit
+          key: ${{ env.SDE_CACHE_KEY }}
+
+      - name: Install Intel SDE only on cache miss
+        if: steps.gate.outputs.eligible == '1' && steps.sde.outputs.cache-hit != 'true'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          mkdir -p /home/runner/sdekit
+          curl -fsSL -o /tmp/sde.tar.xz https://downloadmirror.intel.com/924984/sde-external-10.13.1-2026-07-28-lin.tar.xz
+          echo '94e97d623fec54385686e1e7ba65ebc9941748c05ee451423948334892bf2b50  /tmp/sde.tar.xz' | sha256sum -c -
+          tar -xf /tmp/sde.tar.xz -C /home/runner/sdekit
+
+      - name: Locate Intel SDE
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          SDE="$(find /home/runner/sdekit -maxdepth 3 -type f -name sde64 -print -quit)"
+          test -x "$SDE"
+          echo "SDE=$SDE" >> "$GITHUB_ENV"
+
+      - name: Prepare frozen direct X50 and X67 sources
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          set -euo pipefail
+          git fetch origin backup-pre-cleanup-20260830:refs/remotes/origin/backup-pre-cleanup-20260830
+          git show origin/backup-pre-cleanup-20260830:bench_sine_53_wide_fast2.c > bench_sine_53_wide_fast2.c
+          git show origin/backup-pre-cleanup-20260830:bench_sine_53_wide_intel.c > bench_sine_53_wide_intel.c
+          git show origin/backup-pre-cleanup-20260830:sine_53_coeff_source.c > sine_53_coeff_source.c
+          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
+          cp sine53_x50_unit_production.c generated_x50.c
+          python3 sine53_production_inject_unit3200.py generated_x50.c
+          cp sine53_x67_wide_production.c generated_x67.c
+          python3 sine53_production_inject_wide3200.py generated_x67.c
+          python3 - <<'PY'
+          from pathlib import Path
+          for name in ('generated_x50.c','generated_x67.c'):
+              p=Path(name); s=p.read_text(); needle='int main(void){'
+              if s.count(needle)!=1: raise SystemExit(f'{name}: main count={s.count(needle)}')
+              p.write_text(s.replace(needle,'int sine53_embedded_main(void){',1))
+          PY
+          ! grep -R -n 'Sine53CustomPermanent2Core\|custom2' generated_x50.c generated_x67.c sine53_engine_adapter.c benchmark_support/bench_sine53_direct_vs_svml.cpp
+
+      - name: Build, prove SVML HA route, link and smoke-test
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/sinesvml/bin
+          CC=/opt/intel/oneapi/compiler/latest/bin/icx
+          CXX=/opt/intel/oneapi/compiler/latest/bin/icpx
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
+          COMMON='-O3 -g -xHost -qopt-zmm-usage=high -fp-model=precise -fno-math-errno'
+          SVMLFLAGS='-O3 -g -xHost -qopt-zmm-usage=high -fp-model=precise -fno-math-errno -fimf-use-svml=true -fimf-precision=high:sin'
+          LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_rt -lpthread -lm -ldl"
+          "$CC" $COMMON $INC -DSINE53_GENERATED_SOURCE='"generated_x50.c"' -c sine53_engine_adapter.c -o /tmp/sinesvml/bin/unit_adapter.o
+          "$CC" $COMMON $INC -DSINE53_GENERATED_SOURCE='"generated_x67.c"' -c sine53_engine_adapter.c -o /tmp/sinesvml/bin/wide_adapter.o
+          "$CC" $SVMLFLAGS -c benchmark_support/svml_sin_high.c -o /tmp/sinesvml/bin/svml_sin_high.o
+          nm -u /tmp/sinesvml/bin/svml_sin_high.o | tee /tmp/sinesvml/svml.undefined
+          grep -Eiq '__svml_.*sin' /tmp/sinesvml/svml.undefined
+          for eng in unit wide; do
+            if [[ "$eng" == unit ]]; then DEF=0; AD=/tmp/sinesvml/bin/unit_adapter.o; else DEF=1; AD=/tmp/sinesvml/bin/wide_adapter.o; fi
+            "$CXX" -std=c++17 $COMMON $INC -DSINE53_ENGINE_WIDE=$DEF benchmark_support/bench_sine53_direct_vs_svml.cpp "$AD" /tmp/sinesvml/bin/svml_sin_high.o -o /tmp/sinesvml/bin/$eng $LIBS
+          done
+          nm /tmp/sinesvml/bin/unit | grep -E '__svml_.*sin' | head -20 | tee /tmp/sinesvml/final_svml_symbols.txt
+          test -s /tmp/sinesvml/final_svml_symbols.txt
+          ldd /tmp/sinesvml/bin/unit | tee /tmp/sinesvml/ldd-unit.txt
+          ! grep -q 'not found' /tmp/sinesvml/ldd-unit.txt
+          taskset -c 0 /tmp/sinesvml/bin/unit native svml 100 >/dev/null
+          {
+            echo "CPU=$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+            echo "HEAD=$(git rev-parse HEAD)"
+            echo "COMPILER=$($CXX --version | head -1)"
+            echo "SIZES=100,400,1000,5000,20000,40000,70000,200000,500000,1000000"
+            echo "OURS=SINE53_X50_X67_direct_single_thread"
+            echo "SVML=Intel_SVML_high_accuracy_sin"
+            echo "SVML_FLAGS=$SVMLFLAGS"
+            echo "AFFINITY=CPU0_both"
+            echo "INPUT_BANDS=0_to_1,1_to_500,1000_to_10000"
+            echo "ACCURACY=120000_random_total_MPFR256_40000_per_band_half_positive_half_negative"
+            echo "METRICS=wall,cpu,effective_cores,peak_rss,SDE_retired_instructions,SDE_logical_bytes,absolute_max_ulp"
+          } > /tmp/sinesvml/meta.txt
+
+      - name: Native timing CPU and RSS
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:/opt/intel/oneapi/mkl/latest/lib:${LD_LIBRARY_PATH:-}"
+          : > /tmp/sinesvml/native.txt
+          for n in 100 400 1000 5000 20000 40000 70000 200000 500000 1000000; do
+            for eng in unit wide; do
+              for stack in ours svml; do
+                taskset -c 0 /tmp/sinesvml/bin/$eng native "$stack" "$n" | tee -a /tmp/sinesvml/native.txt
+              done
+            done
+          done
+
+      - name: SDE retired instructions and logical bytes
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:/opt/intel/oneapi/mkl/latest/lib:${LD_LIBRARY_PATH:-}"
+          for n in 100 400 1000 5000 20000 40000 70000 200000 500000 1000000; do
+            for eng in unit wide; do
+              for stack in ours svml noop; do
+                d="/tmp/sinesvml/sde-${eng}-${stack}-${n}"; mkdir -p "$d"
+                (cd "$d"; taskset -c 0 "$SDE" -mix -iform -global_region \
+                  -control 'start:address:sine53_profile_start,stop:address:sine53_profile_stop' \
+                  -omix mix.txt -- /tmp/sinesvml/bin/$eng sde "$stack" "$n" > program.txt)
+              done
+            done
+          done
+
+      - name: MPFR-256 absolute accuracy 120K
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:/opt/intel/oneapi/mkl/latest/lib:${LD_LIBRARY_PATH:-}"
+          : > /tmp/sinesvml/accuracy.txt
+          taskset -c 0 /tmp/sinesvml/bin/unit accuracy | tee -a /tmp/sinesvml/accuracy.txt
+          taskset -c 0 /tmp/sinesvml/bin/wide accuracy | tee -a /tmp/sinesvml/accuracy.txt
+
+      - name: Aggregate full result
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          python3 - <<'PY' | tee /tmp/sinesvml/results.txt
+          import pathlib,re
+          root=pathlib.Path('/tmp/sinesvml'); print(root.joinpath('meta.txt').read_text(),end='')
+          sizes=[100,400,1000,5000,20000,40000,70000,200000,500000,1000000]; weights={'unit':2,'wide':4}
+          p=re.compile(r'SINESVML_NATIVE engine=(unit|wide) stack=(ours|svml) n=(\d+) cases=(\d+) reps=(\d+) wall_ns_el=([0-9.]+) cpu_ns_el=([0-9.]+) effective_cores=([0-9.]+) maxrss_kib=(\d+)')
+          native={}
+          for line in root.joinpath('native.txt').read_text().splitlines():
+              m=p.search(line)
+              if m:native[(m.group(1),m.group(2),int(m.group(3)))]=dict(wall=float(m.group(6)),cpu=float(m.group(7)),rss=int(m.group(9)))
+          missing=[(e,s,n) for e in weights for s in ('ours','svml') for n in sizes if (e,s,n) not in native]
+          if missing: raise SystemExit(f'missing native {missing[:8]}')
+          def mix(path):
+              text=path.read_text(errors='replace'); blocks=re.findall(r'# \$global-dynamic-counts(.*?)# END_GLOBAL_DYNAMIC_STATS',text,re.S); sec=blocks[-1] if blocks else text; out={}
+              for k,v in re.findall(r'^\s*(\S+)\s+([0-9]+)\s*$',sec,re.M):out[k]=int(v)
+              if out.get('*total',0)<=0:
+                  ts=[int(x) for x in re.findall(r'^\*total\s+([0-9]+)\s*$',text,re.M)]
+                  if ts:out['*total']=ts[-1]
+              return out
+          def delta(a,b,k):return max(0,a.get(k,0)-b.get(k,0))
+          def memb(a,b):
+              z=0
+              for k in set(a)|set(b):
+                  m=re.match(r'^\*mem-(?:read|write)-(\d+)$',k)
+                  if m:z+=int(m.group(1))*max(0,a.get(k,0)-b.get(k,0))
+              return z
+          acc=root.joinpath('accuracy.txt').read_text()
+          am=re.findall(r'SINESVML_ACC band=(\S+) N=(\d+) OURS_MAX_ULP=(\d+) SVML_MAX_ULP=(\d+) OURS_GT1=(\d+) SVML_GT1=(\d+)',acc)
+          if len(am)!=3: raise SystemExit(f'accuracy bands found={len(am)}')
+          ours_max=max(int(x[2]) for x in am); svml_max=max(int(x[3]) for x in am); ours_gt1=sum(int(x[4]) for x in am); svml_gt1=sum(int(x[5]) for x in am)
+          print(f'ACCURACY_TOTAL N=120000 OURS_MAX_ULP={ours_max} SVML_MAX_ULP={svml_max} OURS_GT1={ours_gt1} SVML_GT1={svml_gt1}')
+          print('HEADER n ours_wall_ns_el svml_wall_ns_el speed_ratio ours_cpu_ns_el svml_cpu_ns_el ours_effective_cores svml_effective_cores ours_maxrss_kib svml_maxrss_kib ours_instr_el svml_instr_el ours_logical_b_el svml_logical_b_el')
+          for n in sizes:
+              agg={s:{'wall':0.0,'cpu':0.0,'rss':0,'instr':0,'bytes':0} for s in ('ours','svml')}
+              for eng,w in weights.items():
+                  for s in ('ours','svml'):
+                      z=native[(eng,s,n)];agg[s]['wall']+=z['wall']*w/6.0;agg[s]['cpu']+=z['cpu']*w/6.0;agg[s]['rss']=max(agg[s]['rss'],z['rss'])
+                  raw={s:mix(root/f'sde-{eng}-{s}-{n}'/'mix.txt') for s in ('ours','svml','noop')}
+                  for s in ('ours','svml'):
+                      agg[s]['instr']+=delta(raw[s],raw['noop'],'*total');agg[s]['bytes']+=memb(raw[s],raw['noop'])
+              o,i=agg['ours'],agg['svml'];den=6.0*n;oi=o['instr']/den;ii=i['instr']/den;ob=o['bytes']/den;ib=i['bytes']/den;oc=o['cpu']/o['wall'];ic=i['cpu']/i['wall']
+              print(f'FINAL n={n} ours_wall_ns_el={o["wall"]:.9f} svml_wall_ns_el={i["wall"]:.9f} speed_ratio={i["wall"]/o["wall"]:.6f} ours_cpu_ns_el={o["cpu"]:.9f} svml_cpu_ns_el={i["cpu"]:.9f} ours_effective_cores={oc:.6f} svml_effective_cores={ic:.6f} ours_maxrss_kib={o["rss"]} svml_maxrss_kib={i["rss"]} ours_instr_el={oi:.6f} svml_instr_el={ii:.6f} ours_logical_b_el={ob:.6f} svml_logical_b_el={ib:.6f}')
+          PY
+
+      - name: Upload result
+        if: steps.gate.outputs.eligible == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sine53-direct-vs-svml-ha-${{ matrix.slot }}
+          path: |
+            /tmp/sinesvml/meta.txt
+            /tmp/sinesvml/results.txt
+            /tmp/sinesvml/native.txt
+            /tmp/sinesvml/accuracy.txt
+            /tmp/sinesvml/final_svml_symbols.txt
+          if-no-files-found: error
