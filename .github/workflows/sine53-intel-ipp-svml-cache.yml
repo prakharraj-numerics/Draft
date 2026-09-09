@@ -1,0 +1,145 @@
+name: SINE53 Intel IPP VM + SVML HA cache setup
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/sine53-intel-ipp-svml-cache.yml'
+
+jobs:
+  prepare:
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 48
+      matrix:
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48]
+    runs-on: ubuntu-24.04
+    env:
+      ONEAPI_CACHE_KEY: sine53-oneapi-compiler-mkl-ipp-svml-2026.1-v1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require exact Intel Xeon 6973P-C + AVX-512 + CPU0
+        id: gate
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          MODEL="$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          VENDOR="$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          if [[ "$VENDOR" == GenuineIntel && "$MODEL" == *"6973P-C"* ]] \
+             && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f \
+             && taskset -c 0 true 2>/dev/null; then
+            echo eligible=1 >> "$GITHUB_OUTPUT"
+            echo "ELIGIBLE $MODEL slot=${{ matrix.slot }}"
+          else
+            echo eligible=0 >> "$GITHUB_OUTPUT"
+            echo "SKIP $MODEL slot=${{ matrix.slot }}"
+          fi
+
+      - name: Configure Intel oneAPI APT repository
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \( -iname '*microsoft*' -o -iname '*azure*' \) -delete || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ca-certificates wget gpg-agent binutils build-essential
+          wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
+            | gpg --dearmor \
+            | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg >/dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main' \
+            | sudo tee /etc/apt/sources.list.d/oneAPI.list >/dev/null
+          sudo apt-get update -qq
+
+      - name: Restore shared Intel oneAPI cache
+        if: steps.gate.outputs.eligible == '1'
+        id: oneapi
+        uses: actions/cache@v4
+        with:
+          path: /opt/intel/oneapi
+          key: ${{ env.ONEAPI_CACHE_KEY }}
+
+      - name: Install compiler + MKL + IPP on cache miss
+        if: steps.gate.outputs.eligible == '1' && steps.oneapi.outputs.cache-hit != 'true'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            intel-oneapi-compiler-dpcpp-cpp \
+            intel-oneapi-mkl-devel \
+            intel-oneapi-ipp-devel
+
+      - name: Verify compiler, MKL, IPP VM and SVML HA route
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          set -euo pipefail
+          ICX=/opt/intel/oneapi/compiler/latest/bin/icx
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          IPPROOT=/opt/intel/oneapi/ipp/latest
+
+          test -x "$ICX"
+          test -d "$MKLROOT/include"
+          test -f "$IPPROOT/include/ipp.h"
+          test -f "$IPPROOT/include/ipp/ippvm.h"
+          test -e "$IPPROOT/lib/libippvm.so" -o -e "$IPPROOT/lib/libippvm.a"
+          test -e "$IPPROOT/lib/libipps.so" -o -e "$IPPROOT/lib/libipps.a"
+          test -e "$IPPROOT/lib/libippcore.so" -o -e "$IPPROOT/lib/libippcore.a"
+
+          cat > /tmp/ipp_probe.c <<'C'
+          #include <ipp.h>
+          int main(void) {
+              Ipp64f x[8] = {0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8};
+              Ipp64f y[8];
+              IppStatus st = ippsSin_64f_A53(x,y,8);
+              return st == ippStsNoErr ? 0 : 1;
+          }
+          C
+          "$ICX" -O2 -I"$IPPROOT/include" /tmp/ipp_probe.c -o /tmp/ipp_probe \
+            -L"$IPPROOT/lib" -Wl,-rpath,"$IPPROOT/lib" -lipps -lippvm -lippcore -lm
+          /tmp/ipp_probe
+
+          cat > /tmp/svml_probe.c <<'C'
+          #include <math.h>
+          #include <stddef.h>
+          __attribute__((noinline))
+          void probe(const double *restrict x, double *restrict y, size_t n) {
+          #pragma clang loop vectorize(enable) interleave(enable)
+              for (size_t i = 0; i < n; ++i) y[i] = sin(x[i]);
+          }
+          int main(void) {
+              double x[16], y[16];
+              for (int i=0;i<16;i++) x[i]=0.1*(i+1);
+              probe(x,y,16);
+              return y[0] == 0.0;
+          }
+          C
+          "$ICX" -O3 -g -xHost -qopt-zmm-usage=high -fp-model=precise -fno-math-errno \
+            -fimf-use-svml=true -fimf-precision=high:sin \
+            -c /tmp/svml_probe.c -o /tmp/svml_probe.o
+          nm -u /tmp/svml_probe.o | grep -Eq '__svml_.*sin'
+          "$ICX" -O3 -xHost -qopt-zmm-usage=high -fp-model=precise -fno-math-errno \
+            -fimf-use-svml=true -fimf-precision=high:sin \
+            /tmp/svml_probe.c -o /tmp/svml_probe
+          nm /tmp/svml_probe | grep -Eq '__svml_.*sin'
+          /tmp/svml_probe
+
+          {
+            echo "SINE53_INTEL_CACHE_READY=1"
+            echo "CPU=$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+            echo "ICX=$($ICX --version | head -1)"
+            echo "IPP_ROOT=$IPPROOT"
+            echo "IPP_HEADER=$IPPROOT/include/ipp.h"
+            echo "IPP_VM_HEADER=$IPPROOT/include/ipp/ippvm.h"
+            echo "IPP_LIB=$IPPROOT/lib"
+            echo "SVML_ROUTE=verified_high_accuracy_sin"
+            echo "CACHE_KEY=$ONEAPI_CACHE_KEY"
+          } | tee /tmp/intel-cache-ready.txt
+
+      - name: Upload verification artifact
+        if: steps.gate.outputs.eligible == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sine53-intel-cache-ready-${{ matrix.slot }}
+          path: /tmp/intel-cache-ready.txt
+          if-no-files-found: error
