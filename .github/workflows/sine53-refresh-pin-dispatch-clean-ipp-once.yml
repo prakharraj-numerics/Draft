@@ -30,8 +30,6 @@ jobs:
           p=Path('.github/workflows/sine-53-production-final-9600-6973pc.yml')
           s=p.read_text()
           new=os.environ['NEW']
-          pat=r'(test "\$\(sha256sum sine53_x67_wide_production\.c \| awk '\''\{print \$1\}'\''\)" = ")[0-9a-f]{64}(" )?'
-          # Simpler exact line replacement, preserving syntax.
           lines=s.splitlines(True)
           hits=0
           out=[]
@@ -47,7 +45,7 @@ jobs:
           q=Path('.github/workflows/sine53-frozen-mpfr-accuracy.yml')
           t=q.read_text()
           if 'workflow_dispatch:' not in t:
-              if not t.startswith('name:') or '\non:\n' not in t:
+              if '\non:\n' not in t:
                   raise SystemExit('unexpected MPFR workflow header')
               t=t.replace('\non:\n','\non:\n  workflow_dispatch:\n',1)
               q.write_text(t)
