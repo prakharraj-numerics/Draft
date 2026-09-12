@@ -70,3 +70,5 @@ static int sde(const std::string&stack,size_t n){
 }
 
 int main(int argc,char**argv){if(argc<3||argc>4)return 2;if(!sine53_engine_init())return 3;std::string mode=argv[1];size_t n=(size_t)std::strtoull(argv[argc-1],nullptr,10);int rc=2;if(mode=="native"&&argc==4)rc=native(argv[2],n);else if(mode=="sde"&&argc==4)rc=sde(argv[2],n);else if(mode=="pair"&&argc==3)rc=paircheck(n);sine53_engine_cleanup();return rc;}
+
+// clean-X67 rebenchmark trigger 2026-09-12
