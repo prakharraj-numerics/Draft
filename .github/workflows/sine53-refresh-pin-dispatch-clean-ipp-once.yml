@@ -1,0 +1,86 @@
+name: Refresh SINE53 X67 pin and dispatch clean validation
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  refresh-and-dispatch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Refresh frozen X67 SHA-256 pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          NEW="$(sha256sum sine53_x67_wide_production.c | awk '{print $1}')"
+          echo "CLEAN_X67_SHA256=$NEW"
+          export NEW
+          python3 - <<'PY'
+          from pathlib import Path
+          import os,re
+          p=Path('.github/workflows/sine-53-production-final-9600-6973pc.yml')
+          s=p.read_text()
+          new=os.environ['NEW']
+          pat=r'(test "\$\(sha256sum sine53_x67_wide_production\.c \| awk '\''\{print \$1\}'\''\)" = ")[0-9a-f]{64}(" )?'
+          # Simpler exact line replacement, preserving syntax.
+          lines=s.splitlines(True)
+          hits=0
+          out=[]
+          for line in lines:
+              if 'sha256sum sine53_x67_wide_production.c' in line:
+                  line=re.sub(r'[0-9a-f]{64}', new, line)
+                  hits+=1
+              out.append(line)
+          if hits!=1:
+              raise SystemExit(f'expected 1 X67 pin line, found {hits}')
+          p.write_text(''.join(out))
+
+          q=Path('.github/workflows/sine53-frozen-mpfr-accuracy.yml')
+          t=q.read_text()
+          if 'workflow_dispatch:' not in t:
+              if not t.startswith('name:') or '\non:\n' not in t:
+                  raise SystemExit('unexpected MPFR workflow header')
+              t=t.replace('\non:\n','\non:\n  workflow_dispatch:\n',1)
+              q.write_text(t)
+          PY
+          grep -n 'sha256sum sine53_x67_wide_production.c' .github/workflows/sine-53-production-final-9600-6973pc.yml
+          grep -n 'workflow_dispatch' .github/workflows/sine53-frozen-mpfr-accuracy.yml
+          git diff --check
+
+      - name: Commit refreshed pin and remove one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm .github/workflows/sine53-refresh-pin-dispatch-clean-ipp-once.yml
+          git add .github/workflows/sine-53-production-final-9600-6973pc.yml .github/workflows/sine53-frozen-mpfr-accuracy.yml
+          git commit -m 'Refresh clean SINE53 X67 pin for validation'
+          git push origin HEAD:main
+
+      - name: Dispatch clean MPFR accuracy and IPP VM benchmark
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for wf in sine53-frozen-mpfr-accuracy.yml sine53-direct-vs-ippvm-xeon.yml; do
+            code="$(curl -sS -o /tmp/dispatch.out -w '%{http_code}' \
+              -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/${wf}/dispatches" \
+              -d '{"ref":"main"}')"
+            echo "DISPATCH workflow=$wf http=$code"
+            test "$code" = 204
+          done
