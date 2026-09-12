@@ -274,7 +274,6 @@ OVEC static inline void x12_prepare_block(const double * __restrict x,size_t bas
 {
     const __m512d Z=_mm512_setzero_pd(),ONE=_mm512_set1_pd(1.0);
     const __m512d VINVP=_mm512_set1_pd(0x1.45f306dc9c883p-2);
-    const __m512d RS=_mm512_set1_pd(0x1.8p52);
     const __m512d PIH=_mm512_set1_pd(0x1.921fb54442d18p+1);
     const __m512d PIL=_mm512_set1_pd(-0x1.1a62633145c07p-53);
     const __m512i ABSM=_mm512_set1_epi64((long long)UINT64_C(0x7fffffffffffffff));
@@ -293,14 +292,14 @@ OVEC static inline void x12_prepare_block(const double * __restrict x,size_t bas
         *active_out=active; *pure_unit_out=1; return;
     }
 
-    /* Dedicated full-width >1 path.  No unit-lane blends, no integer quotient
-       conversion, no generic octant bookkeeping. */
+    /* Dedicated full-width >1 path.  Keep the existing residual/LUT pipeline,
+       but use an explicit int32 quotient instead of the 2^52 right-shifter encoding. */
     if(__builtin_expect(active==0xff && unit==0,1)){
-        __m512d Y=_mm512_fmadd_pd(ax,VINVP,RS);
-        __m512d N=_mm512_sub_pd(Y,RS);
-        __m512i Ybits=_mm512_castpd_si512(Y);
-        __m512i paritybits=_mm512_slli_epi64(Ybits,63);
-        __mmask8 parity=_mm512_movepi64_mask(paritybits);
+        __m256i qi=_mm512_cvt_roundpd_epi32(_mm512_mul_pd(ax,VINVP),
+                        _MM_FROUND_TO_NEAREST_INT|_MM_FROUND_NO_EXC);
+        __m512d N=_mm512_cvtepi32_pd(qi);
+        __m256i parityv=_mm256_slli_epi32(_mm256_and_si256(qi,_mm256_set1_epi32(1)),31);
+        __mmask8 parity=(__mmask8)_mm256_movemask_ps(_mm256_castsi256_ps(parityv));
 
         __m512d rh=_mm512_fnmadd_pd(N,PIH,ax);
         __m512d rl=_mm512_mul_pd(N,PIL);
@@ -466,7 +465,6 @@ OVEC __attribute__((noinline,hot,aligned(64))) static void octant_vector_v8_rawx
 {
     (void)k;
     const __m512d VINV=_mm512_set1_pd(0x1.45f306dc9c883p+7);
-    const __m512d RS=_mm512_set1_pd(0x1.8p52);
     const __m512d HHI=_mm512_set1_pd(0x1.921fb54442d18p-8);
     const __m512d HLO=_mm512_set1_pd(0x1.1a62633145c07p-62);
     const __m512d ONE=_mm512_set1_pd(1.0),Z=_mm512_setzero_pd();
@@ -477,11 +475,11 @@ OVEC __attribute__((noinline,hot,aligned(64))) static void octant_vector_v8_rawx
     __m512d nvx0,nN0,nd0,nc0_0,nc1_0; __m256i nji0; __mmask8 nsg0;
     if(n>=32){
         nvx0=_mm512_loadu_pd(x);
-        __m512d Y=_mm512_fmadd_pd(nvx0,VINV,RS);
-        nN0=_mm512_sub_pd(Y,RS);
-        __m512i yb=_mm512_castpd_si512(Y);
-        nji0=_mm256_and_si256(_mm512_cvtepi64_epi32(yb),I511);
-        nsg0=_mm512_movepi64_mask(_mm512_slli_epi64(yb,54));
+        __m256i nq0=_mm512_cvt_roundpd_epi32(_mm512_mul_pd(nvx0,VINV),
+                        _MM_FROUND_TO_NEAREST_INT|_MM_FROUND_NO_EXC);
+        nN0=_mm512_cvtepi32_pd(nq0);
+        nji0=_mm256_and_si256(nq0,I511);
+        nsg0=(__mmask8)_mm256_movemask_ps(_mm256_castsi256_ps(_mm256_slli_epi32(nq0,22)));
         nc0_0=_mm512_i32gather_pd(nji0,x65_s,8);
         nc1_0=_mm512_i32gather_pd(nji0,x65_c,8);
         nd0=_mm512_fnmadd_pd(nN0,HHI,nvx0);
@@ -495,11 +493,11 @@ OVEC __attribute__((noinline,hot,aligned(64))) static void octant_vector_v8_rawx
 
         for(int g=1;g<4;g++){
             vx[g]=_mm512_loadu_pd(x+i+8*g);
-            __m512d Y=_mm512_fmadd_pd(vx[g],VINV,RS);
-            N[g]=_mm512_sub_pd(Y,RS);
-            __m512i yb=_mm512_castpd_si512(Y);
-            ji[g]=_mm256_and_si256(_mm512_cvtepi64_epi32(yb),I511);
-            sg[g]=_mm512_movepi64_mask(_mm512_slli_epi64(yb,54));
+            __m256i q=_mm512_cvt_roundpd_epi32(_mm512_mul_pd(vx[g],VINV),
+                            _MM_FROUND_TO_NEAREST_INT|_MM_FROUND_NO_EXC);
+            N[g]=_mm512_cvtepi32_pd(q);
+            ji[g]=_mm256_and_si256(q,I511);
+            sg[g]=(__mmask8)_mm256_movemask_ps(_mm256_castsi256_ps(_mm256_slli_epi32(q,22)));
             c0[g]=_mm512_i32gather_pd(ji[g],x65_s,8);
             c1[g]=_mm512_i32gather_pd(ji[g],x65_c,8);
             d[g]=_mm512_fnmadd_pd(N[g],HHI,vx[g]);
@@ -509,11 +507,11 @@ OVEC __attribute__((noinline,hot,aligned(64))) static void octant_vector_v8_rawx
         /* Launch next iteration's first gather before current polynomial chains. */
         if(__builtin_expect(i+64<=n,1)){
             nvx0=_mm512_loadu_pd(x+i+32);
-            __m512d Y=_mm512_fmadd_pd(nvx0,VINV,RS);
-            nN0=_mm512_sub_pd(Y,RS);
-            __m512i yb=_mm512_castpd_si512(Y);
-            nji0=_mm256_and_si256(_mm512_cvtepi64_epi32(yb),I511);
-            nsg0=_mm512_movepi64_mask(_mm512_slli_epi64(yb,54));
+            __m256i nq=_mm512_cvt_roundpd_epi32(_mm512_mul_pd(nvx0,VINV),
+                            _MM_FROUND_TO_NEAREST_INT|_MM_FROUND_NO_EXC);
+            nN0=_mm512_cvtepi32_pd(nq);
+            nji0=_mm256_and_si256(nq,I511);
+            nsg0=(__mmask8)_mm256_movemask_ps(_mm256_castsi256_ps(_mm256_slli_epi32(nq,22)));
             nc0_0=_mm512_i32gather_pd(nji0,x65_s,8);
             nc1_0=_mm512_i32gather_pd(nji0,x65_c,8);
             nd0=_mm512_fnmadd_pd(nN0,HHI,nvx0);
