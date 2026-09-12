@@ -1,0 +1,87 @@
+name: One-shot SINE53 X67 right-shifter cleanup
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  clean-x67:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply validated COS53 X67 reduction cleanup to SINE53
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('sine53_x67_wide_production.c')
+          s = p.read_text()
+
+          def repl(old, new, count, label):
+              global s
+              n = s.count(old)
+              if n != count:
+                  raise SystemExit(f'{label}: expected {count}, found {n}')
+              s = s.replace(old, new)
+
+          # The two right-shifter constants used only by the quotient/state trick.
+          repl('    const __m512d RS=_mm512_set1_pd(0x1.8p52);\n', '', 2, 'RS declarations')
+
+          repl(
+          '''    /* Dedicated full-width >1 path.  No unit-lane blends, no integer quotient\n       conversion, no generic octant bookkeeping. */\n    if(__builtin_expect(active==0xff && unit==0,1)){\n        __m512d Y=_mm512_fmadd_pd(ax,VINVP,RS);\n        __m512d N=_mm512_sub_pd(Y,RS);\n        __m512i Ybits=_mm512_castpd_si512(Y);\n        __m512i paritybits=_mm512_slli_epi64(Ybits,63);\n        __mmask8 parity=_mm512_movepi64_mask(paritybits);\n''',
+          '''    /* Dedicated full-width >1 path.  Keep the existing residual/LUT pipeline,\n       but use an explicit int32 quotient instead of the 2^52 right-shifter encoding. */\n    if(__builtin_expect(active==0xff && unit==0,1)){\n        __m256i qi=_mm512_cvt_roundpd_epi32(_mm512_mul_pd(ax,VINVP),\n                        _MM_FROUND_TO_NEAREST_INT|_MM_FROUND_NO_EXC);\n        __m512d N=_mm512_cvtepi32_pd(qi);\n        __m256i parityv=_mm256_slli_epi32(_mm256_and_si256(qi,_mm256_set1_epi32(1)),31);\n        __mmask8 parity=(__mmask8)_mm256_movemask_ps(_mm256_castsi256_ps(parityv));\n''', 1, 'full-width quotient block')
+
+          repl(
+          '''        __m512d Y=_mm512_fmadd_pd(nvx0,VINV,RS);\n        nN0=_mm512_sub_pd(Y,RS);\n        __m512i yb=_mm512_castpd_si512(Y);\n        nji0=_mm256_and_si256(_mm512_cvtepi64_epi32(yb),I511);\n        nsg0=_mm512_movepi64_mask(_mm512_slli_epi64(yb,54));\n''',
+          '''        __m256i nq0=_mm512_cvt_roundpd_epi32(_mm512_mul_pd(nvx0,VINV),\n                        _MM_FROUND_TO_NEAREST_INT|_MM_FROUND_NO_EXC);\n        nN0=_mm512_cvtepi32_pd(nq0);\n        nji0=_mm256_and_si256(nq0,I511);\n        nsg0=(__mmask8)_mm256_movemask_ps(_mm256_castsi256_ps(_mm256_slli_epi32(nq0,22)));\n''', 1, 'raw X67 initial preload')
+
+          repl(
+          '''            __m512d Y=_mm512_fmadd_pd(vx[g],VINV,RS);\n            N[g]=_mm512_sub_pd(Y,RS);\n            __m512i yb=_mm512_castpd_si512(Y);\n            ji[g]=_mm256_and_si256(_mm512_cvtepi64_epi32(yb),I511);\n            sg[g]=_mm512_movepi64_mask(_mm512_slli_epi64(yb,54));\n''',
+          '''            __m256i q=_mm512_cvt_roundpd_epi32(_mm512_mul_pd(vx[g],VINV),\n                            _MM_FROUND_TO_NEAREST_INT|_MM_FROUND_NO_EXC);\n            N[g]=_mm512_cvtepi32_pd(q);\n            ji[g]=_mm256_and_si256(q,I511);\n            sg[g]=(__mmask8)_mm256_movemask_ps(_mm256_castsi256_ps(_mm256_slli_epi32(q,22)));\n''', 1, 'raw X67 grouped lanes')
+
+          repl(
+          '''            __m512d Y=_mm512_fmadd_pd(nvx0,VINV,RS);\n            nN0=_mm512_sub_pd(Y,RS);\n            __m512i yb=_mm512_castpd_si512(Y);\n            nji0=_mm256_and_si256(_mm512_cvtepi64_epi32(yb),I511);\n            nsg0=_mm512_movepi64_mask(_mm512_slli_epi64(yb,54));\n''',
+          '''            __m256i nq=_mm512_cvt_roundpd_epi32(_mm512_mul_pd(nvx0,VINV),\n                            _MM_FROUND_TO_NEAREST_INT|_MM_FROUND_NO_EXC);\n            nN0=_mm512_cvtepi32_pd(nq);\n            nji0=_mm256_and_si256(nq,I511);\n            nsg0=(__mmask8)_mm256_movemask_ps(_mm256_castsi256_ps(_mm256_slli_epi32(nq,22)));\n''', 1, 'raw X67 next-iteration preload')
+
+          forbidden = ['0x1.8p52', '_mm512_fmadd_pd(ax,VINVP,RS)', '_mm512_fmadd_pd(nvx0,VINV,RS)', '_mm512_fmadd_pd(vx[g],VINV,RS)']
+          for token in forbidden:
+              if token in s:
+                  raise SystemExit(f'forbidden right-shifter residue remains: {token}')
+
+          required = [
+              '_mm512_cvt_roundpd_epi32(_mm512_mul_pd(ax,VINVP)',
+              '_mm512_cvtepi32_pd(qi)',
+              '_mm256_and_si256(nq0,I511)',
+              '_mm256_slli_epi32(q,22)',
+          ]
+          for token in required:
+              if token not in s:
+                  raise SystemExit(f'required cleaned construct missing: {token}')
+
+          p.write_text(s)
+          PY
+
+          git diff --check
+          ! grep -n '0x1\.8p52' sine53_x67_wide_production.c
+          test "$(git diff --name-only)" = "sine53_x67_wide_production.c"
+          git diff -- sine53_x67_wide_production.c
+
+      - name: Commit cleaned SINE53 X67 and remove one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm .github/workflows/sine53-clean-x67-rightshift-once.yml
+          git add sine53_x67_wide_production.c
+          git commit -m "Clean SINE53 X67 quotient reduction"
+          git push origin HEAD:main
