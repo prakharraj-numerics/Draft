@@ -1,0 +1,8 @@
+{
+  global:
+    s53_init;
+    s53_eval;
+    s53_close;
+  local:
+    *;
+};
