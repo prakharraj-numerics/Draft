@@ -20,7 +20,7 @@
 static s53w_kernel S53_FN(_kobj);
 static s53w_kernel *S53_FN(_kptr);
 
-__attribute__((visibility("default"))) int S53_FN(_init)(void)
+__attribute__((visibility("hidden"))) int S53_FN(_init)(void)
 {
     pih2 = (double *)(void *)s53_r0;
     pil2 = (double *)(void *)s53_r1;
@@ -32,12 +32,12 @@ __attribute__((visibility("default"))) int S53_FN(_init)(void)
     return 1;
 }
 
-__attribute__((visibility("default"))) void S53_FN(_eval)(double *out, const double *in, size_t n)
+__attribute__((visibility("hidden"))) void S53_FN(_eval)(double *out, const double *in, size_t n)
 {
     octant_eval_v8(S53_FN(_kptr), in, out, n);
 }
 
-__attribute__((visibility("default"))) void S53_FN(_close)(void)
+__attribute__((visibility("hidden"))) void S53_FN(_close)(void)
 {
     S53_FN(_kptr) = NULL;
     pih2 = NULL;
