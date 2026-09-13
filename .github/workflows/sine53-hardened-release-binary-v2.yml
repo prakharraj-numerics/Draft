@@ -7,6 +7,9 @@ on:
     paths:
       - '.github/workflows/sine53-hardened-release-binary-v2.yml'
       - 'release/build_s53_hardened.sh'
+      - 'release/s53_frozen_engine.c'
+      - 'release/s53_frozen_api.c'
+      - 'release/s53_exports.map'
 
 jobs:
   release:
