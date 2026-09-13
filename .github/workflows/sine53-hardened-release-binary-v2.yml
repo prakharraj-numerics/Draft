@@ -1,0 +1,110 @@
+name: SINE53 hardened cleaned release binary v2
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ release/sine53-binary-20260913 ]
+    paths:
+      - '.github/workflows/sine53-hardened-release-binary-v2.yml'
+      - 'release/build_s53_hardened.sh'
+
+jobs:
+  release:
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 96
+      matrix:
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96]
+    runs-on: ubuntu-24.04
+    env:
+      FLINT_PREFIX: /home/runner/flint36
+      MKL_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      IPP_NUM_THREADS: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require exact Intel Xeon 6973P-C
+        id: gate
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          MODEL="$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          VENDOR="$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          echo "CPU_MODEL=$MODEL SLOT=${{ matrix.slot }}"
+          if [[ "$VENDOR" == GenuineIntel && "$MODEL" == *"6973P-C"* ]] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f && taskset -c 0 true 2>/dev/null; then
+            echo eligible=1 >> "$GITHUB_OUTPUT"
+            echo "ELIGIBLE $MODEL slot=${{ matrix.slot }}"
+          else
+            echo eligible=0 >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install build prerequisites
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \( -iname '*microsoft*' -o -iname '*azure*' \) -delete || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential binutils file libgmp-dev libmpfr-dev python3 curl xz-utils gpg-agent wget ca-certificates
+          wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg >/dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main' | sudo tee /etc/apt/sources.list.d/oneAPI.list >/dev/null
+          sudo apt-get update -qq
+
+      - name: Restore Intel oneAPI
+        if: steps.gate.outputs.eligible == '1'
+        id: oneapi
+        uses: actions/cache@v4
+        with:
+          path: /opt/intel/oneapi
+          key: sine53-oneapi-compiler-mkl-ipp-svml-2026.1-v1
+
+      - name: Install Intel oneAPI on cache miss
+        if: steps.gate.outputs.eligible == '1' && steps.oneapi.outputs.cache-hit != 'true'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: sudo apt-get install -y --no-install-recommends intel-oneapi-mkl-devel intel-oneapi-compiler-dpcpp-cpp intel-oneapi-ipp-devel
+
+      - name: Restore FLINT 3.6.0
+        if: steps.gate.outputs.eligible == '1'
+        id: flint
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/flint36
+          key: flint-3.6.0-ubuntu24-x86_64-native-cd49f6116fb977da331dbb6627f4998397730a62253bd7a70a201ad5a00576d7-v2
+
+      - name: Install FLINT on cache miss
+        if: steps.gate.outputs.eligible == '1' && steps.flint.outputs.cache-hit != 'true'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          curl -L --fail --retry 3 -o /tmp/flint.tar.xz https://github.com/flintlib/flint/releases/download/v3.6.0/flint-3.6.0.tar.xz
+          echo '134d39731a6dd926254625d646d85bf5990c68a3f2326cd54d2a6983e3e11dd8  /tmp/flint.tar.xz' | sha256sum -c -
+          tar -xf /tmp/flint.tar.xz -C /tmp
+          cd /tmp/flint-3.6.0
+          CFLAGS='-O3 -march=native -DNDEBUG' ./configure --prefix="$FLINT_PREFIX"
+          make -j2 >/dev/null
+          make install >/dev/null
+
+      - name: Build, audit, validate and benchmark hardened release
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: bash release/build_s53_hardened.sh
+
+      - name: Upload exact-host release
+        if: steps.gate.outputs.eligible == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sine53-hardened-clean-linux-x86_64-v2-slot-${{ matrix.slot }}
+          path: |
+            /tmp/s53release/libs53.so
+            /tmp/s53release/s53.h
+            /tmp/s53release/USAGE.txt
+            /tmp/s53release/SHA256.txt
+            /tmp/s53release/source-build-hashes.txt
+            /tmp/s53release/audit.txt
+            /tmp/s53release/accuracy.txt
+            /tmp/s53release/performance.csv
+          if-no-files-found: error
+          retention-days: 30
