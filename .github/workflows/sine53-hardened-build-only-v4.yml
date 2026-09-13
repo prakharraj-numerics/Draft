@@ -46,7 +46,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /home/runner/flint36
-          key: flint-3.6.0-ubuntu24-x86_64-native-cd49f6116fb977da331dbb6627f4998397730a62253bd7a70a201ad5a00576d7-v2
+          key: flint-3.6.0-ubuntu24-x86_64-generic-v1
 
       - name: Install FLINT on cache miss
         if: steps.flint.outputs.cache-hit != 'true'
@@ -56,7 +56,7 @@ jobs:
           echo '134d39731a6dd926254625d646d85bf5990c68a3f2326cd54d2a6983e3e11dd8  /tmp/flint.tar.xz' | sha256sum -c -
           tar -xf /tmp/flint.tar.xz -C /tmp
           cd /tmp/flint-3.6.0
-          CFLAGS='-O3 -march=x86-64-v3 -DNDEBUG' ./configure --prefix="$FLINT_PREFIX"
+          CFLAGS='-O2 -march=x86-64-v2 -DNDEBUG' ./configure --prefix="$FLINT_PREFIX"
           make -j2 >/dev/null
           make install >/dev/null
 
