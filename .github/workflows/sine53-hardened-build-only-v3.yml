@@ -1,0 +1,133 @@
+name: SINE53 hardened build-only v3
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ release/sine53-binary-20260913 ]
+    paths:
+      - '.github/workflows/sine53-hardened-build-only-v3.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      FLINT_PREFIX: /home/runner/flint36
+      SOURCE_DATE_EPOCH: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install prerequisites
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \( -iname '*microsoft*' -o -iname '*azure*' \) -delete || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential binutils file libgmp-dev libmpfr-dev python3 curl xz-utils gpg-agent wget ca-certificates
+          wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg >/dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main' | sudo tee /etc/apt/sources.list.d/oneAPI.list >/dev/null
+          sudo apt-get update -qq
+
+      - name: Restore Intel oneAPI
+        id: oneapi
+        uses: actions/cache@v4
+        with:
+          path: /opt/intel/oneapi
+          key: sine53-oneapi-compiler-mkl-ipp-svml-2026.1-v1
+
+      - name: Install Intel oneAPI on cache miss
+        if: steps.oneapi.outputs.cache-hit != 'true'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: sudo apt-get install -y --no-install-recommends intel-oneapi-mkl-devel intel-oneapi-compiler-dpcpp-cpp intel-oneapi-ipp-devel
+
+      - name: Restore FLINT 3.6.0
+        id: flint
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/flint36
+          key: flint-3.6.0-ubuntu24-x86_64-native-cd49f6116fb977da331dbb6627f4998397730a62253bd7a70a201ad5a00576d7-v2
+
+      - name: Install FLINT on cache miss
+        if: steps.flint.outputs.cache-hit != 'true'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          curl -L --fail --retry 3 -o /tmp/flint.tar.xz https://github.com/flintlib/flint/releases/download/v3.6.0/flint-3.6.0.tar.xz
+          echo '134d39731a6dd926254625d646d85bf5990c68a3f2326cd54d2a6983e3e11dd8  /tmp/flint.tar.xz' | sha256sum -c -
+          tar -xf /tmp/flint.tar.xz -C /tmp
+          cd /tmp/flint-3.6.0
+          CFLAGS='-O3 -march=x86-64-v3 -DNDEBUG' ./configure --prefix="$FLINT_PREFIX"
+          make -j2 >/dev/null
+          make install >/dev/null
+
+      - name: Build and audit Granite Rapids release
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          src = Path('release/build_s53_hardened.sh').read_text()
+          old = "COMMON='-O3 -xHost -qopt-zmm-usage=high -fp-model=precise -fno-math-errno -DNDEBUG'"
+          new = "COMMON='-O3 -xGRANITERAPIDS -qopt-zmm-usage=high -fp-model=precise -fno-math-errno -DNDEBUG'"
+          if old not in src:
+              raise SystemExit('expected compiler target line missing')
+          src = src.replace(old, new, 1)
+          marker = "cat > /tmp/validate.cpp <<'CPP'"
+          if marker not in src:
+              raise SystemExit('validation marker missing')
+          src = src.split(marker, 1)[0]
+          src += r'''
+          cat > /tmp/s53release/s53.h <<'H'
+          #ifndef S53_H
+          #define S53_H
+          #include <stddef.h>
+          #ifdef __cplusplus
+          extern "C" {
+          #endif
+          int s53_init(void);
+          void s53_eval(double *out, const double *in, size_t n, unsigned profile);
+          void s53_close(void);
+          #ifdef __cplusplus
+          }
+          #endif
+          #endif
+          H
+          cat > /tmp/s53release/USAGE.txt <<'U'
+          S53 binary interface
+
+          Call s53_init() once before evaluation.
+          Call s53_eval(out, in, n, profile) for n binary64 inputs.
+          profile 0: unit-range evaluation.
+          profile 1: wide-range evaluation.
+          Call s53_close() when finished.
+          U
+          sha256sum /tmp/s53release/libs53.so > /tmp/s53release/SHA256.txt
+          {
+            echo 'frozen_source_commit=9f4b58c18eecb99c9220099eb0cd312702400e8f'
+            echo 'x50_sha256=ba79230dc0154f198129b21eb87fd0f96de0457e0a7f08f6e78ec2d29dd1806c'
+            echo 'x67_sha256=737ef77ff9ca07e3e198675fab80a10b04c568f425af925a8f2e96e888bae602'
+            cat /tmp/generated_sha256.txt
+          } > /tmp/s53release/source-build-hashes.txt
+          '''
+          Path('/tmp/build_only.sh').write_text(src)
+          PY
+          bash /tmp/build_only.sh
+          echo '--- FINAL EXPORT CHECK ---'
+          nm -D --defined-only /tmp/s53release/libs53.so
+          echo '--- FINAL DEPENDENCY CHECK ---'
+          readelf -d /tmp/s53release/libs53.so | grep NEEDED || true
+          echo '--- FINAL HASH ---'
+          cat /tmp/s53release/SHA256.txt
+
+      - name: Upload hardened binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: sine53-hardened-clean-linux-x86_64-graniterapids-v3
+          path: |
+            /tmp/s53release/libs53.so
+            /tmp/s53release/s53.h
+            /tmp/s53release/USAGE.txt
+            /tmp/s53release/SHA256.txt
+            /tmp/s53release/source-build-hashes.txt
+            /tmp/s53release/audit.txt
+          if-no-files-found: error
+          retention-days: 30
