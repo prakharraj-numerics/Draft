@@ -85,7 +85,17 @@ jobs:
           git show origin/backup-pre-cleanup-20260830:bench_sine_53_wide_fast2.c > bench_sine_53_wide_fast2.c
           git show origin/backup-pre-cleanup-20260830:bench_sine_53_wide_intel.c > bench_sine_53_wide_intel.c
           git show origin/backup-pre-cleanup-20260830:sine_53_coeff_source.c > sine_53_coeff_source.c
-          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('bench_sine_53_wide_fast2.c')
+          s=p.read_text()
+          old='int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN'
+          new='int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN'
+          if s.count(old)!=1:
+              raise SystemExit(f'fast2 main marker count={s.count(old)}')
+          p.write_text(s.replace(old,new,1))
+          PY
+          if grep -q '^int main(void)' bench_sine_53_wide_fast2.c; then echo 'literal fast2 main remains'; exit 1; fi
           sed -i 's/int main(void)/int s53w_disabled_main(void)/' bench_sine_53_wide_intel.c
           sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
           sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
