@@ -1,0 +1,126 @@
+name: SINE53 X67 badcell direct
+on:
+  push:
+    branches: [experiment/sine53-x67-awayzero-fix]
+    paths:
+      - '.github/workflows/sine53-x67-badcell-direct.yml'
+      - 'experiments/x67_badcell_direct_variant.py'
+      - 'experiments/x67_accuracy_scan.cpp'
+  workflow_dispatch:
+
+concurrency:
+  group: sine53-x67-badcell-direct
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 32
+      matrix:
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32]
+    runs-on: ubuntu-24.04
+    env:
+      FLINT_PREFIX: /home/runner/flint36
+      MKL_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - name: Gate exact Xeon
+        id: gate
+        shell: bash
+        run: |
+          MODEL="$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          VENDOR="$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          echo "CPU=$MODEL SLOT=${{ matrix.slot }}"
+          if [[ "$VENDOR" == GenuineIntel && "$MODEL" == *"6973P-C"* ]] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f && taskset -c 0 true 2>/dev/null; then echo eligible=1 >> "$GITHUB_OUTPUT"; else echo eligible=0 >> "$GITHUB_OUTPUT"; fi
+      - name: Prereqs
+        if: steps.gate.outputs.eligible == '1'
+        run: |
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \( -iname '*microsoft*' -o -iname '*azure*' \) -delete || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential libgmp-dev libmpfr-dev python3 curl xz-utils wget ca-certificates gpg-agent
+      - name: Restore oneAPI
+        if: steps.gate.outputs.eligible == '1'
+        id: oneapi
+        uses: actions/cache@v4
+        with:
+          path: /opt/intel/oneapi
+          key: intel-oneapi-prof3-intel-2026.1.0-236-2026.1.1-325-v1
+      - name: Install oneAPI
+        if: steps.gate.outputs.eligible == '1' && steps.oneapi.outputs.cache-hit != 'true'
+        run: |
+          wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg >/dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main' | sudo tee /etc/apt/sources.list.d/oneAPI.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends intel-oneapi-mkl-devel intel-oneapi-compiler-dpcpp-cpp
+      - name: Restore FLINT
+        if: steps.gate.outputs.eligible == '1'
+        id: flint
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/flint36
+          key: flint-3.6.0-ubuntu24-x86_64-native-cd49f6116fb977da331dbb6627f4998397730a62253bd7a70a201ad5a00576d7-v2
+      - name: Install FLINT
+        if: steps.gate.outputs.eligible == '1' && steps.flint.outputs.cache-hit != 'true'
+        run: |
+          curl -L --fail --retry 3 -o /tmp/flint.tar.xz https://github.com/flintlib/flint/releases/download/v3.6.0/flint-3.6.0.tar.xz
+          tar -xf /tmp/flint.tar.xz -C /tmp && cd /tmp/flint-3.6.0
+          CFLAGS='-O3 -march=native -DNDEBUG' ./configure --prefix="$FLINT_PREFIX"
+          make -j2 >/dev/null && make install >/dev/null
+      - name: Prepare sources
+        if: steps.gate.outputs.eligible == '1'
+        run: |
+          set -euo pipefail
+          BASE=9f4b58c18eecb99c9220099eb0cd312702400e8f
+          git fetch origin backup-pre-cleanup-20260830:refs/remotes/origin/backup-pre-cleanup-20260830
+          git show origin/backup-pre-cleanup-20260830:bench_sine_53_wide_fast2.c > bench_sine_53_wide_fast2.c
+          git show origin/backup-pre-cleanup-20260830:bench_sine_53_wide_intel.c > bench_sine_53_wide_intel.c
+          git show origin/backup-pre-cleanup-20260830:sine_53_coeff_source.c > sine_53_coeff_source.c
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('bench_sine_53_wide_fast2.c'); s=p.read_text()
+          old='int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN'
+          new='int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN'
+          if s.count(old)!=1: raise SystemExit(f'fast2 main count={s.count(old)}')
+          p.write_text(s.replace(old,new,1))
+          PY
+          sed -i 's/int main(void)/int s53w_disabled_main(void)/' bench_sine_53_wide_intel.c
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
+          git show "$BASE":sine53_x67_wide_production.c > /tmp/base.c
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/base.c'); s=p.read_text(); old='\nint main(void)\n{'; new='\nint sine53_x67_disabled_main(void)\n{'
+          if s.count(old)!=1: raise SystemExit(f'x67 main count={s.count(old)}')
+          p.write_text(s.replace(old,new,1))
+          PY
+          python3 experiments/x67_badcell_direct_variant.py /tmp/base.c /tmp/direct.c
+      - name: Build and scan
+        if: steps.gate.outputs.eligible == '1'
+        run: |
+          set -euo pipefail
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          CC=/opt/intel/oneapi/compiler/latest/bin/icx
+          CXX=/opt/intel/oneapi/compiler/latest/bin/icpx
+          INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
+          COMMON='-O3 -xHost -qopt-zmm-usage=high -fp-model=precise -fno-math-errno'
+          LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:$MKLROOT/lib:/opt/intel/oneapi/compiler/latest/lib:${LD_LIBRARY_PATH:-}"
+          : > /tmp/direct-results.txt
+          rm -f /tmp/refs.bin
+          for tag in base direct; do
+            src=/tmp/base.c; [[ "$tag" == base ]] || src=/tmp/direct.c
+            "$CC" $COMMON $INC -DSINE53_GENERATED_SOURCE=\"$src\" -c sine53_engine_adapter.c -o /tmp/$tag.o
+            "$CXX" -std=c++17 $COMMON experiments/x67_accuracy_scan.cpp /tmp/$tag.o -o /tmp/scan-$tag $LIBS
+            taskset -c 0 /tmp/scan-$tag "$tag" /tmp/refs.bin | tee -a /tmp/direct-results.txt
+          done
+      - uses: actions/upload-artifact@v4
+        if: steps.gate.outputs.eligible == '1' && always()
+        with:
+          name: x67-badcell-direct-${{ matrix.slot }}
+          path: /tmp/direct-results.txt
