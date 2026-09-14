@@ -8,8 +8,6 @@ if len(sys.argv) != 4:
 src, out, mode = sys.argv[1:]
 s = Path(src).read_text()
 
-# The sine LUT anchor for j=2 and j=510 is bit-identical and occurs exactly twice
-# within x65_s[]. Other source tables may legitimately contain the same literal.
 CELL = '0x1.921d1fcdec784p-7'
 m = re.search(r'static const double x65_s\[512\].*?=\{(.*?)\};', s, re.S)
 if not m or m.group(1).count(CELL) != 2:
@@ -61,12 +59,14 @@ new = '''            __m512d z=_mm512_mul_pd(d[g],d[g]);
                 __m512d ad=_mm512_castsi512_pd(_mm512_and_epi64(_mm512_castpd_si512(d[g]),ABSM));
                 __mmask8 mb=(__mmask8)(_mm512_cmp_pd_mask(ad,BLO,_CMP_GE_OQ) &
                                        _mm512_cmp_pd_mask(ad,BHI,_CMP_LE_OQ));
-                __mmask8 x67_fix=(__mmask8)(mj & mb);
+                /* Correct half-cell only: j=2 needs d>0, j=510 needs d<0.
+                   Since c1 has opposite signs in the mirrored cells, both are cd>0. */
+                __mmask8 morient=_mm512_cmp_pd_mask(cd,Z,_CMP_GT_OQ);
+                __mmask8 x67_fix=(__mmask8)(mj & mb & morient);
                 if(__builtin_expect(x67_fix!=0,0)){
                     const __m512d DH=_mm512_set1_pd(0x1.921fb54442d18p-7);
                     const __m512d DL=_mm512_set1_pd(0x1.1a62633145c07p-61);
                     const __m512d N5040=_mm512_set1_pd(-1.0/5040.0);
-                    /* Target cells are mirrored, so b=|d| for both j=2 and 510. */
                     __m512d b=ad;
                     __m512d rh=_mm512_add_pd(DH,b);
                     __m512d re=_mm512_sub_pd(b,_mm512_sub_pd(rh,DH));
