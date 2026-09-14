@@ -25,4 +25,11 @@ def edit_array(text,name,idx,step):
 
 s=edit_array(s,'x65_s',cell,ss)
 s=edit_array(s,'x65_c',cell,cs)
+# Normalize the production entry formatting so the workflow can reliably
+# rename it before linking into the scan harness. This is formatting only.
+mm=list(re.finditer(r'\bint main\(void\)\s*\{',s))
+if len(mm)!=1:
+    raise SystemExit(f'main count={len(mm)}')
+m=mm[0]
+s=s[:m.start()]+'int main(void){'+s[m.end():]
 Path(dst).write_text(s)
