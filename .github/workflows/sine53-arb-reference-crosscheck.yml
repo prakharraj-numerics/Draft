@@ -1,0 +1,93 @@
+name: SINE53 Arb reference crosscheck
+
+on:
+  push:
+    branches:
+      - experiment/sine53-taylor-architecture
+    paths:
+      - '.github/workflows/sine53-arb-reference-crosscheck.yml'
+  workflow_dispatch:
+
+jobs:
+  arb-crosscheck:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install FLINT Arb and MPFR
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential libflint-dev libmpfr-dev libgmp-dev
+      - name: Write exact-input Arb/MPFR crosscheck
+        shell: bash
+        run: |
+          cat > /tmp/arb_crosscheck.cpp <<'CPP'
+          #include <arb.h>
+          #include <arf.h>
+          #include <mpfr.h>
+          #include <algorithm>
+          #include <cmath>
+          #include <cstdint>
+          #include <cstdio>
+          #include <cstring>
+          #include <vector>
+
+          static uint64_t mix64(uint64_t x){ x+=UINT64_C(0x9e3779b97f4a7c15); x=(x^(x>>30))*UINT64_C(0xbf58476d1ce4e5b9); x=(x^(x>>27))*UINT64_C(0x94d049bb133111eb); return x^(x>>31); }
+          static double u01(uint64_t x){ return ((double)(mix64(x)>>11)+0.5)*0x1p-53; }
+          static void fill(std::vector<double>& x,int r,uint64_t seed){
+            double lo=r==0?0.0:(r==1?1.0:500.0);
+            double hi=r==0?1.0:(r==1?500.0:10000.0);
+            for(size_t i=0;i<x.size();++i) x[i]=lo+(hi-lo)*u01(seed+i*UINT64_C(0x9e3779b97f4a7c15));
+            if(!x.empty()) x[0]=lo;
+            if(x.size()>1) x[1]=std::nextafter(hi,lo);
+          }
+          static uint64_t bits(double x){ uint64_t u; std::memcpy(&u,&x,8); return u; }
+          int main(){
+            const size_t ns[]={100,500,2000,8000,30000,70000,300000,1000000};
+            const char* rn[]={"0_to_1","1_to_500","500_to_10000"};
+            mpfr_t ma,ms; mpfr_init2(ma,256); mpfr_init2(ms,256);
+            arb_t aa,as; arf_t lo,hi; arb_init(aa); arb_init(as); arf_init(lo); arf_init(hi);
+            unsigned long long total=0,mismatch=0,ambig=0;
+            for(int r=0;r<3;r++) for(size_t kk=0;kk<8;kk++){
+              size_t n=ns[kk]; std::vector<double> x(n);
+              uint64_t seed=UINT64_C(0x53a17d9b1)+uint64_t(r)*UINT64_C(0x100000001b3)+n;
+              fill(x,r,seed);
+              unsigned long long mm=0,am=0;
+              double firstx=0,firstm=0,firsta=0; bool have=false;
+              for(size_t i=0;i<n;i++){
+                mpfr_set_d(ma,x[i],MPFR_RNDN); mpfr_sin(ms,ma,MPFR_RNDN); double mr=mpfr_get_d(ms,MPFR_RNDN);
+                arb_set_d(aa,x[i]); arb_sin(as,aa,512);
+                arb_get_lbound_arf(lo,as,512); arb_get_ubound_arf(hi,as,512);
+                double al=arf_get_d(lo,ARF_RND_NEAR), ah=arf_get_d(hi,ARF_RND_NEAR);
+                if(bits(al)!=bits(ah)){ am++; if(!have){firstx=x[i];firstm=mr;firsta=al;have=true;} continue; }
+                if(bits(mr)!=bits(al)){ mm++; if(!have){firstx=x[i];firstm=mr;firsta=al;have=true;} }
+              }
+              total+=n; mismatch+=mm; ambig+=am;
+              std::printf("ARB_CHECK range=%s n=%zu mpfr_vs_arb_mismatch=%llu arb_ambiguous=%llu",rn[r],n,mm,am);
+              if(have) std::printf(" first_x=%.17g mpfr=%.17g arb=%.17g",firstx,firstm,firsta);
+              std::printf("\n");
+            }
+            // Explicitly cross-check the discovered 2-ULP input at 1024 Arb bits as well.
+            const double xbad=895.33860424636578;
+            mpfr_set_d(ma,xbad,MPFR_RNDN); mpfr_sin(ms,ma,MPFR_RNDN); double mr=mpfr_get_d(ms,MPFR_RNDN);
+            arb_set_d(aa,xbad); arb_sin(as,aa,1024); arb_get_lbound_arf(lo,as,1024); arb_get_ubound_arf(hi,as,1024);
+            double al=arf_get_d(lo,ARF_RND_NEAR), ah=arf_get_d(hi,ARF_RND_NEAR);
+            std::printf("OFFENDER x=%.17g mpfr256=%.17g arb1024_lo_round=%.17g arb1024_hi_round=%.17g same=%d\n",xbad,mr,al,ah,(bits(mr)==bits(al)&&bits(al)==bits(ah))?1:0);
+            std::printf("SUMMARY total=%llu mpfr_vs_arb_mismatch=%llu arb_ambiguous=%llu\n",total,mismatch,ambig);
+            arf_clear(hi); arf_clear(lo); arb_clear(as); arb_clear(aa); mpfr_clear(ms); mpfr_clear(ma); flint_cleanup_master();
+            return (mismatch||ambig)?1:0;
+          }
+          CPP
+          g++ -O3 -std=c++17 /tmp/arb_crosscheck.cpp -o /tmp/arb_crosscheck -lflint -lmpfr -lgmp -lm
+      - name: Run exact-input crosscheck
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/arb_crosscheck | tee arb_crosscheck.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sine53-arb-reference-crosscheck
+          path: arb_crosscheck.txt
