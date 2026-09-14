@@ -1,0 +1,167 @@
+name: SINE53 X67 cold helper eval
+on:
+  push:
+    branches: [experiment/sine53-x67-awayzero-fix]
+    paths:
+      - '.github/workflows/sine53-x67-cold-helper-eval.yml'
+      - 'experiments/x67_badcell_cold_variants.py'
+      - 'experiments/x67_accuracy_scan.cpp'
+      - 'experiments/x67_fix_speed_bench.cpp'
+  workflow_dispatch:
+
+concurrency:
+  group: sine53-x67-cold-helper-eval
+  cancel-in-progress: true
+
+jobs:
+  eval:
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 96
+      matrix:
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96]
+    runs-on: ubuntu-24.04
+    env:
+      FLINT_PREFIX: /home/runner/flint36
+      MKL_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - name: Gate exact Xeon
+        id: gate
+        shell: bash
+        run: |
+          MODEL="$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          VENDOR="$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          echo "CPU=$MODEL SLOT=${{ matrix.slot }}"
+          if [[ "$VENDOR" == GenuineIntel && "$MODEL" == *"6973P-C"* ]] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f && taskset -c 0 true 2>/dev/null; then echo eligible=1 >> "$GITHUB_OUTPUT"; else echo eligible=0 >> "$GITHUB_OUTPUT"; fi
+      - name: Prereqs
+        if: steps.gate.outputs.eligible == '1'
+        run: |
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \( -iname '*microsoft*' -o -iname '*azure*' \) -delete || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential libgmp-dev libmpfr-dev python3 curl xz-utils wget ca-certificates gpg-agent
+      - name: Restore oneAPI
+        if: steps.gate.outputs.eligible == '1'
+        id: oneapi
+        uses: actions/cache@v4
+        with:
+          path: /opt/intel/oneapi
+          key: intel-oneapi-prof3-intel-2026.1.0-236-2026.1.1-325-v1
+      - name: Install oneAPI
+        if: steps.gate.outputs.eligible == '1' && steps.oneapi.outputs.cache-hit != 'true'
+        run: |
+          wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg >/dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main' | sudo tee /etc/apt/sources.list.d/oneAPI.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends intel-oneapi-mkl-devel intel-oneapi-compiler-dpcpp-cpp
+      - name: Restore FLINT
+        if: steps.gate.outputs.eligible == '1'
+        id: flint
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/flint36
+          key: flint-3.6.0-ubuntu24-x86_64-native-cd49f6116fb977da331dbb6627f4998397730a62253bd7a70a201ad5a00576d7-v2
+      - name: Install FLINT
+        if: steps.gate.outputs.eligible == '1' && steps.flint.outputs.cache-hit != 'true'
+        run: |
+          curl -L --fail --retry 3 -o /tmp/flint.tar.xz https://github.com/flintlib/flint/releases/download/v3.6.0/flint-3.6.0.tar.xz
+          tar -xf /tmp/flint.tar.xz -C /tmp && cd /tmp/flint-3.6.0
+          CFLAGS='-O3 -march=native -DNDEBUG' ./configure --prefix="$FLINT_PREFIX"
+          make -j2 >/dev/null && make install >/dev/null
+      - name: Prepare and build variants
+        if: steps.gate.outputs.eligible == '1'
+        run: |
+          set -euo pipefail
+          BASE=9f4b58c18eecb99c9220099eb0cd312702400e8f
+          mkdir -p /tmp/cold
+          git fetch origin backup-pre-cleanup-20260830:refs/remotes/origin/backup-pre-cleanup-20260830
+          git show origin/backup-pre-cleanup-20260830:bench_sine_53_wide_fast2.c > bench_sine_53_wide_fast2.c
+          git show origin/backup-pre-cleanup-20260830:bench_sine_53_wide_intel.c > bench_sine_53_wide_intel.c
+          git show origin/backup-pre-cleanup-20260830:sine_53_coeff_source.c > sine_53_coeff_source.c
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('bench_sine_53_wide_fast2.c'); s=p.read_text()
+          old='int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN'
+          new='int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN'
+          if s.count(old)!=1: raise SystemExit(f'fast2 main count={s.count(old)}')
+          p.write_text(s.replace(old,new,1))
+          PY
+          sed -i 's/int main(void)/int s53w_disabled_main(void)/' bench_sine_53_wide_intel.c
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
+          git show "$BASE":sine53_x67_wide_production.c > /tmp/cold/base.c
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/cold/base.c'); s=p.read_text(); old='\nint main(void)\n{'; new='\nint sine53_x67_disabled_main(void)\n{'
+          if s.count(old)!=1: raise SystemExit(f'x67 main count={s.count(old)}')
+          p.write_text(s.replace(old,new,1))
+          PY
+          python3 experiments/x67_badcell_cold_variants.py /tmp/cold/base.c /tmp/cold/exact.c exact
+          python3 experiments/x67_badcell_cold_variants.py /tmp/cold/base.c /tmp/cold/abs2.c abs2
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          CC=/opt/intel/oneapi/compiler/latest/bin/icx
+          CXX=/opt/intel/oneapi/compiler/latest/bin/icpx
+          INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
+          COMMON='-O3 -xHost -qopt-zmm-usage=high -fp-model=precise -fno-math-errno'
+          LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:$MKLROOT/lib:/opt/intel/oneapi/compiler/latest/lib:${LD_LIBRARY_PATH:-}"
+          for m in base exact abs2; do
+            "$CC" $COMMON $INC -DSINE53_GENERATED_SOURCE=\"/tmp/cold/$m.c\" -c sine53_engine_adapter.c -o /tmp/cold/$m.o
+            "$CXX" -std=c++17 $COMMON experiments/x67_accuracy_scan.cpp /tmp/cold/$m.o -o /tmp/cold/scan-$m $LIBS
+            "$CXX" -std=c++17 $COMMON experiments/x67_fix_speed_bench.cpp /tmp/cold/$m.o -o /tmp/cold/speed-$m $LIBS
+          done
+      - name: Accuracy gate
+        if: steps.gate.outputs.eligible == '1'
+        run: |
+          set -euo pipefail
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:$MKLROOT/lib:/opt/intel/oneapi/compiler/latest/lib:${LD_LIBRARY_PATH:-}"
+          : > /tmp/cold/accuracy.txt; rm -f /tmp/refs.bin
+          for m in base exact abs2; do taskset -c 0 /tmp/cold/scan-$m "$m" /tmp/refs.bin | tee -a /tmp/cold/accuracy.txt; done
+          grep -E 'SCAN tag=exact .*ge2=0 .*maxulp=1' /tmp/cold/accuracy.txt
+          grep -E 'SCAN tag=abs2 .*ge2=0 .*maxulp=1' /tmp/cold/accuracy.txt
+      - name: Paired speed matrix
+        if: steps.gate.outputs.eligible == '1'
+        run: |
+          set -euo pipefail
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:$MKLROOT/lib:/opt/intel/oneapi/compiler/latest/lib:${LD_LIBRARY_PATH:-}"
+          : > /tmp/cold/raw.txt
+          bands=(0_1 1_500 500_10000); sizes=(100 500 2000 8000 30000 70000 300000 1000000); variants=(base exact abs2); cell=0
+          for b in "${bands[@]}"; do for n in "${sizes[@]}"; do
+            rot=$((cell%3)); for k in 0 1 2; do idx=$(((k+rot)%3)); v=${variants[$idx]}; taskset -c 0 /tmp/cold/speed-$v "$v" "$b" "$n" | tee -a /tmp/cold/raw.txt; done; cell=$((cell+1));
+          done; done
+          python3 - <<'PY'
+          import math,re
+          from collections import defaultdict
+          rx=re.compile(r'variant=(\S+) band=(\S+) n=(\d+).*median_ns_el=([0-9.]+)'); d=defaultdict(dict)
+          for line in open('/tmp/cold/raw.txt'):
+              m=rx.search(line)
+              if m: v,b,n,t=m.groups(); d[(b,int(n))][v]=float(t)
+          bands=['0_1','1_500','500_10000']; sizes=[100,500,2000,8000,30000,70000,300000,1000000]; out=['band n base exact ratio_exact abs2 ratio_abs2']; r={'exact':[],'abs2':[]}; rb={v:{b:[] for b in bands} for v in r}
+          for b in bands:
+              for n in sizes:
+                  z=d[(b,n)]
+                  if set(z)!={'base','exact','abs2'}: raise SystemExit(f'missing {b} {n}: {z}')
+                  a=z['exact']/z['base']; q=z['abs2']/z['base']; r['exact'].append(a); r['abs2'].append(q); rb['exact'][b].append(a); rb['abs2'][b].append(q)
+                  out.append(f'{b} {n} {z["base"]:.9f} {z["exact"]:.9f} {a:.6f} {z["abs2"]:.9f} {q:.6f}')
+          gm=lambda x: math.exp(sum(math.log(v) for v in x)/len(x))
+          out.append('')
+          for v in ('exact','abs2'): out.append(f'OVERALL {v} geomean_ratio={gm(r[v]):.6f} delta_pct={(gm(r[v])-1)*100:+.3f} wins={sum(x<1 for x in r[v])}/24')
+          for v in ('exact','abs2'):
+              for b in bands: out.append(f'BAND {v} {b} geomean_ratio={gm(rb[v][b]):.6f} delta_pct={(gm(rb[v][b])-1)*100:+.3f}')
+          open('/tmp/cold/summary.txt','w').write('\n'.join(out)+'\n'); print('\n'.join(out))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: steps.gate.outputs.eligible == '1' && always()
+        with:
+          name: x67-cold-helper-${{ matrix.slot }}
+          path: |
+            /tmp/cold/accuracy.txt
+            /tmp/cold/raw.txt
+            /tmp/cold/summary.txt
