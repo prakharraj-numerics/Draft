@@ -45,6 +45,15 @@ elif mode=='baseline':
 else:
     raise SystemExit('unknown mode '+mode)
 
+# The frozen X67 source is a standalone benchmark and contains its own real
+# entry point.  Disable that exact multiline entry point before embedding the
+# source in sine53_engine_adapter.c.  Do this here, before appending the small
+# CI dummy main, so the workflow can rename the dummy unambiguously.
+prod_main='\nint main(void)\n{'
+if s.count(prod_main)!=1:
+    raise SystemExit(f'production main count={s.count(prod_main)}')
+s=s.replace(prod_main,'\nint sine53_production_disabled_main(void)\n{',1)
+
 # The CI wrapper renames this dummy entry point before embedding the source.
 # Production code is never modified.
 s += '\nint main(void){return 0;}\n'
