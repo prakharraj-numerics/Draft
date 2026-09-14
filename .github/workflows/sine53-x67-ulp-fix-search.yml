@@ -94,7 +94,6 @@ jobs:
         if: steps.gate.outputs.eligible == '1'
         run: |
           set -euo pipefail
-          source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 || true
           MKLROOT=/opt/intel/oneapi/mkl/latest
           CC=/opt/intel/oneapi/compiler/latest/bin/icx
           CXX=/opt/intel/oneapi/compiler/latest/bin/icpx
