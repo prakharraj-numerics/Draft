@@ -24,8 +24,9 @@ jobs:
         shell: bash
         run: |
           cat > /tmp/arb_crosscheck.cpp <<'CPP'
-          #include <arb.h>
-          #include <arf.h>
+          #include <flint/arb.h>
+          #include <flint/arf.h>
+          #include <flint/flint.h>
           #include <mpfr.h>
           #include <algorithm>
           #include <cmath>
@@ -69,7 +70,6 @@ jobs:
               if(have) std::printf(" first_x=%.17g mpfr=%.17g arb=%.17g",firstx,firstm,firsta);
               std::printf("\n");
             }
-            // Explicitly cross-check the discovered 2-ULP input at 1024 Arb bits as well.
             const double xbad=895.33860424636578;
             mpfr_set_d(ma,xbad,MPFR_RNDN); mpfr_sin(ms,ma,MPFR_RNDN); double mr=mpfr_get_d(ms,MPFR_RNDN);
             arb_set_d(aa,xbad); arb_sin(as,aa,1024); arb_get_lbound_arf(lo,as,1024); arb_get_ubound_arf(hi,as,1024);
