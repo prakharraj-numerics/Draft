@@ -206,7 +206,7 @@ jobs:
             volatile double sink=yf[n/2]+yt[n/2]; (void)sink;
             std::printf("RESULT range=%s n=%zu reps=%zu frozen_ns_el=%.9f taylor_ns_el=%.9f speedup_taylor=%.6f frozen_maxulp=%llu taylor_maxulp=%llu frozen_gt1=%llu taylor_gt1=%llu frozen_exact=%llu taylor_exact=%llu\n",
               label,n,reps,mf,mt,mf/mt,(unsigned long long)af.mx,(unsigned long long)at.mx,(unsigned long long)af.gt1,(unsigned long long)at.gt1,(unsigned long long)af.exact,(unsigned long long)at.exact);
-            t.cleanup(); f.cleanup(); dlclose(t.h); dlclose(f.h); return 0;
+            return 0;
           }
           CPP
 
@@ -239,7 +239,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:/opt/intel/oneapi/mkl/latest/lib:${LD_LIBRARY_PATH:-}"
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:/opt/intel/oneapi/mkl/latest/lib:/opt/intel/oneapi/compiler/latest/lib:${LD_LIBRARY_PATH:-}"
           for spec in '0 0-1 x50' '1 1-500 x67' '2 500-10000 x67'; do
             read -r rid label eng <<< "$spec"
             for n in 100 500 2000 8000 30000 70000 300000 1000000; do
