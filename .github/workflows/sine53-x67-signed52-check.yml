@@ -92,12 +92,6 @@ jobs:
           sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
           sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
           git show "$BASE":sine53_x67_wide_production.c > /tmp/frozen.c
-          python3 - <<'PY'
-          p='/tmp/frozen.c'
-          s=open(p).read(); needle='int main(void){'
-          if s.count(needle)!=1: raise SystemExit(f'main count={s.count(needle)}')
-          open(p,'w').write(s.replace(needle,'int sine53_embedded_main(void){',1))
-          PY
 
       - name: Build and signed-scan original frozen X67
         if: steps.gate.outputs.eligible == '1'
