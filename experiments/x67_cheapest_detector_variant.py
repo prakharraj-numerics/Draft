@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from pathlib import Path
+import re
 import sys
 
 if len(sys.argv) != 4:
@@ -7,10 +8,13 @@ if len(sys.argv) != 4:
 src, out, mode = sys.argv[1:]
 s = Path(src).read_text()
 
-# The LUT anchor for j=2 and j=510 is bit-identical and occurs exactly twice.
+# The sine LUT anchor for j=2 and j=510 is bit-identical and occurs exactly twice
+# within x65_s[]. Other source tables may legitimately contain the same literal.
 CELL = '0x1.921d1fcdec784p-7'
-if s.count(CELL) != 2:
-    raise SystemExit(f'expected exactly two target-cell anchor literals, got {s.count(CELL)}')
+m = re.search(r'static const double x65_s\[512\].*?=\{(.*?)\};', s, re.S)
+if not m or m.group(1).count(CELL) != 2:
+    got = -1 if not m else m.group(1).count(CELL)
+    raise SystemExit(f'expected exactly two target-cell anchors in x65_s, got {got}')
 
 old = '''            __m512d z=_mm512_mul_pd(d[g],d[g]);
             __m512d ec=_mm512_fmadd_pd(z,C24,MH);      /* -1/2 + z/24 */
