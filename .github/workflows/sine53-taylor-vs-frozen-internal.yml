@@ -1,0 +1,280 @@
+name: SINE53 Taylor vs frozen internal
+
+on:
+  push:
+    branches:
+      - experiment/sine53-taylor-architecture
+    paths:
+      - '.github/workflows/sine53-taylor-vs-frozen-internal.yml'
+  workflow_dispatch:
+
+jobs:
+  benchmark:
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 96
+      matrix:
+        slot: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96]
+    runs-on: ubuntu-24.04
+    env:
+      FLINT_PREFIX: /home/runner/flint36
+      MKL_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require exact Intel Xeon 6973P-C + AVX-512
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL="$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          VENDOR="$(lscpu | awk -F: '/Vendor ID/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          ALLOWED="$(grep Cpus_allowed_list /proc/self/status | awk '{print $2}')"
+          echo "CPU_MODEL=$MODEL VENDOR=$VENDOR SLOT=${{ matrix.slot }} ALLOWED=$ALLOWED"
+          if [[ "$VENDOR" == GenuineIntel && "$MODEL" == *"6973P-C"* ]] && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f && taskset -c 0 true 2>/dev/null; then
+            echo eligible=1 >> "$GITHUB_OUTPUT"
+          else
+            echo eligible=0 >> "$GITHUB_OUTPUT"
+            echo SKIP_NON_EXACT_XEON
+          fi
+
+      - name: Install prerequisites
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \( -iname '*microsoft*' -o -iname '*azure*' \) -delete || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential libgmp-dev libmpfr-dev python3 curl xz-utils gpg-agent wget ca-certificates
+
+      - name: Restore Intel oneAPI
+        if: steps.gate.outputs.eligible == '1'
+        id: oneapi
+        uses: actions/cache@v4
+        with:
+          path: /opt/intel/oneapi
+          key: intel-oneapi-prof3-intel-2026.1.0-236-2026.1.1-325-v1
+
+      - name: Install Intel oneAPI on cache miss
+        if: steps.gate.outputs.eligible == '1' && steps.oneapi.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg >/dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main' | sudo tee /etc/apt/sources.list.d/oneAPI.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends intel-oneapi-mkl-devel intel-oneapi-compiler-dpcpp-cpp
+
+      - name: Restore FLINT 3.6.0
+        if: steps.gate.outputs.eligible == '1'
+        id: flint
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/flint36
+          key: flint-3.6.0-ubuntu24-x86_64-native-cd49f6116fb977da331dbb6627f4998397730a62253bd7a70a201ad5a00576d7-v2
+
+      - name: Install FLINT on cache miss
+        if: steps.gate.outputs.eligible == '1' && steps.flint.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 -o /tmp/flint.tar.xz https://github.com/flintlib/flint/releases/download/v3.6.0/flint-3.6.0.tar.xz
+          echo '134d39731a6dd926254625d646d85bf5990c68a3f2326cd54d2a6983e3e11dd8  /tmp/flint.tar.xz' | sha256sum -c -
+          tar -xf /tmp/flint.tar.xz -C /tmp
+          cd /tmp/flint-3.6.0
+          CFLAGS='-O3 -march=native -DNDEBUG' ./configure --prefix="$FLINT_PREFIX"
+          make -j2 >/dev/null
+          make install >/dev/null
+
+      - name: Prepare frozen and Taylor production sources
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=9f4b58c18eecb99c9220099eb0cd312702400e8f
+          git fetch origin backup-pre-cleanup-20260830:refs/remotes/origin/backup-pre-cleanup-20260830
+          git show origin/backup-pre-cleanup-20260830:bench_sine_53_wide_fast2.c > bench_sine_53_wide_fast2.c
+          git show origin/backup-pre-cleanup-20260830:bench_sine_53_wide_intel.c > bench_sine_53_wide_intel.c
+          git show origin/backup-pre-cleanup-20260830:sine_53_coeff_source.c > sine_53_coeff_source.c
+          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
+
+          git show "$BASE":sine53_x50_unit_production.c > frozen_x50.c
+          git show "$BASE":sine53_x67_wide_production.c > frozen_x67.c
+          cp sine53_x50_unit_production.c taylor_x50.c
+          cp sine53_x67_wide_production.c taylor_x67.c
+
+          for p in frozen_x50 taylor_x50; do
+            cp "$p.c" "$p.gen.c"
+            python3 sine53_production_inject_unit3200.py "$p.gen.c"
+          done
+          for p in frozen_x67 taylor_x67; do
+            cp "$p.c" "$p.gen.c"
+            python3 sine53_production_inject_wide3200.py "$p.gen.c"
+          done
+          python3 - <<'PY'
+          from pathlib import Path
+          for name in ('frozen_x50.gen.c','taylor_x50.gen.c','frozen_x67.gen.c','taylor_x67.gen.c'):
+              p=Path(name); s=p.read_text(); needle='int main(void){'
+              if s.count(needle)!=1: raise SystemExit(f'{name}: main count={s.count(needle)}')
+              p.write_text(s.replace(needle,'int sine53_embedded_main(void){',1))
+          PY
+
+      - name: Write paired benchmark and MPFR-256 accuracy harness
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          cat > /tmp/taylor_vs_frozen.cpp <<'CPP'
+          #include <mpfr.h>
+          #include <dlfcn.h>
+          #include <algorithm>
+          #include <chrono>
+          #include <cmath>
+          #include <cstdint>
+          #include <cstdio>
+          #include <cstring>
+          #include <numeric>
+          #include <string>
+          #include <vector>
+
+          struct Engine {
+            void* h=nullptr;
+            int (*init)()=nullptr;
+            void (*eval)(double*,const double*,size_t)=nullptr;
+            void (*cleanup)()=nullptr;
+          };
+          static Engine load_engine(const char* path){
+            Engine e; e.h=dlopen(path,RTLD_NOW|RTLD_LOCAL);
+            if(!e.h){ std::fprintf(stderr,"dlopen %s: %s\n",path,dlerror()); std::exit(2); }
+            e.init=(int(*)())dlsym(e.h,"sine53_engine_init");
+            e.eval=(void(*)(double*,const double*,size_t))dlsym(e.h,"sine53_engine_eval");
+            e.cleanup=(void(*)())dlsym(e.h,"sine53_engine_cleanup");
+            if(!e.init||!e.eval||!e.cleanup||!e.init()){ std::fprintf(stderr,"engine init failed %s\n",path); std::exit(3); }
+            return e;
+          }
+          static uint64_t mix64(uint64_t x){ x+=UINT64_C(0x9e3779b97f4a7c15); x=(x^(x>>30))*UINT64_C(0xbf58476d1ce4e5b9); x=(x^(x>>27))*UINT64_C(0x94d049bb133111eb); return x^(x>>31); }
+          static double u01(uint64_t x){ return ((double)(mix64(x)>>11)+0.5)*0x1p-53; }
+          static uint64_t ord(double x){ uint64_t u; std::memcpy(&u,&x,8); return (u>>63)?~u:(u|UINT64_C(0x8000000000000000)); }
+          static uint64_t ulpd(double a,double b){ if(a==b) return 0; uint64_t x=ord(a),y=ord(b); return x>y?x-y:y-x; }
+          static void fill(std::vector<double>& x,int r,uint64_t seed){
+            double lo=r==0?0.0:(r==1?1.0:500.0);
+            double hi=r==0?1.0:(r==1?500.0:10000.0);
+            for(size_t i=0;i<x.size();++i) x[i]=lo+(hi-lo)*u01(seed+i*UINT64_C(0x9e3779b97f4a7c15));
+            if(!x.empty()) x[0]=lo;
+            if(x.size()>1) x[1]=std::nextafter(hi,lo);
+          }
+          static double median(std::vector<double> v){ std::sort(v.begin(),v.end()); return v[v.size()/2]; }
+          static double timed(Engine& e,const std::vector<double>& x,std::vector<double>& y,size_t reps){
+            auto t0=std::chrono::steady_clock::now();
+            for(size_t k=0;k<reps;++k) e.eval(y.data(),x.data(),x.size());
+            auto t1=std::chrono::steady_clock::now();
+            double ns=std::chrono::duration<double,std::nano>(t1-t0).count();
+            return ns/(double(reps)*double(x.size()));
+          }
+          struct Acc { uint64_t mx=0,gt1=0,exact=0; };
+          int main(int argc,char**argv){
+            if(argc!=6){ std::fprintf(stderr,"usage: harness frozen.so taylor.so range n label\n"); return 2; }
+            int r=std::atoi(argv[3]); size_t n=(size_t)std::strtoull(argv[4],nullptr,10); const char* label=argv[5];
+            Engine f=load_engine(argv[1]), t=load_engine(argv[2]);
+            std::vector<double>x(n),yf(n),yt(n); fill(x,r,UINT64_C(0x53a17d9b1)+uint64_t(r)*UINT64_C(0x100000001b3)+n);
+            for(int k=0;k<5;++k){ f.eval(yf.data(),x.data(),n); t.eval(yt.data(),x.data(),n); }
+            size_t reps=(20000000ULL+n-1)/n; if(reps<8) reps=8;
+            std::vector<double> sf,st; sf.reserve(9); st.reserve(9);
+            for(int tr=0;tr<9;++tr){
+              if((tr&1)==0){ sf.push_back(timed(f,x,yf,reps)); st.push_back(timed(t,x,yt,reps)); }
+              else { st.push_back(timed(t,x,yt,reps)); sf.push_back(timed(f,x,yf,reps)); }
+            }
+            double mf=median(sf), mt=median(st);
+            f.eval(yf.data(),x.data(),n); t.eval(yt.data(),x.data(),n);
+            mpfr_t a,s; mpfr_init2(a,256); mpfr_init2(s,256);
+            Acc af,at;
+            for(size_t i=0;i<n;++i){
+              mpfr_set_d(a,x[i],MPFR_RNDN); mpfr_sin(s,a,MPFR_RNDN); double ref=mpfr_get_d(s,MPFR_RNDN);
+              uint64_t uf=ulpd(yf[i],ref), ut=ulpd(yt[i],ref);
+              af.mx=std::max(af.mx,uf); at.mx=std::max(at.mx,ut);
+              af.gt1 += uf>1; at.gt1 += ut>1; af.exact += uf==0; at.exact += ut==0;
+            }
+            mpfr_clear(s); mpfr_clear(a);
+            volatile double sink=yf[n/2]+yt[n/2]; (void)sink;
+            std::printf("RESULT range=%s n=%zu reps=%zu frozen_ns_el=%.9f taylor_ns_el=%.9f speedup_taylor=%.6f frozen_maxulp=%llu taylor_maxulp=%llu frozen_gt1=%llu taylor_gt1=%llu frozen_exact=%llu taylor_exact=%llu\n",
+              label,n,reps,mf,mt,mf/mt,(unsigned long long)af.mx,(unsigned long long)at.mx,(unsigned long long)af.gt1,(unsigned long long)at.gt1,(unsigned long long)af.exact,(unsigned long long)at.exact);
+            t.cleanup(); f.cleanup(); dlclose(t.h); dlclose(f.h); return 0;
+          }
+          CPP
+
+      - name: Build frozen and Taylor shared engines
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/s53cmp
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          CC=/opt/intel/oneapi/compiler/latest/bin/icx
+          CXX=/opt/intel/oneapi/compiler/latest/bin/icpx
+          INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
+          COMMON='-O3 -xHost -qopt-zmm-usage=high -fp-model=precise -fno-math-errno -fPIC'
+          LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
+          for v in frozen_x50 taylor_x50 frozen_x67 taylor_x67; do
+            "$CC" $COMMON $INC -DSINE53_GENERATED_SOURCE='"'"$v"'.gen.c"' -shared sine53_engine_adapter.c -o "/tmp/s53cmp/$v.so" $LIBS
+          done
+          "$CXX" -std=c++17 -O3 /tmp/taylor_vs_frozen.cpp -o /tmp/s53cmp/harness -lmpfr -lgmp -ldl
+          echo "CPU=$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')" | tee /tmp/s53cmp/results.txt
+          echo "EXPERIMENT_HEAD=$(git rev-parse HEAD)" | tee -a /tmp/s53cmp/results.txt
+          echo "FROZEN_BASE=9f4b58c18eecb99c9220099eb0cd312702400e8f" | tee -a /tmp/s53cmp/results.txt
+          echo "COMPILER=$($CXX --version | head -1)" | tee -a /tmp/s53cmp/results.txt
+          echo "SIZES=100,500,2000,8000,30000,70000,300000,1000000" | tee -a /tmp/s53cmp/results.txt
+          echo "RANGES=0-1,1-500,500-10000" | tee -a /tmp/s53cmp/results.txt
+          echo "REFERENCE=MPFR256_RNDN" | tee -a /tmp/s53cmp/results.txt
+
+      - name: Run paired speed and accuracy sweep
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:/opt/intel/oneapi/mkl/latest/lib:${LD_LIBRARY_PATH:-}"
+          for spec in '0 0-1 x50' '1 1-500 x67' '2 500-10000 x67'; do
+            read -r rid label eng <<< "$spec"
+            for n in 100 500 2000 8000 30000 70000 300000 1000000; do
+              taskset -c 0 /tmp/s53cmp/harness "/tmp/s53cmp/frozen_${eng}.so" "/tmp/s53cmp/taylor_${eng}.so" "$rid" "$n" "$label" | tee -a /tmp/s53cmp/results.txt
+            done
+          done
+
+      - name: Summarize
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          python3 - <<'PY' | tee -a /tmp/s53cmp/results.txt
+          import re, pathlib, statistics
+          p=pathlib.Path('/tmp/s53cmp/results.txt')
+          rows=[]
+          rx=re.compile(r'RESULT range=(\S+) n=(\d+) reps=(\d+) frozen_ns_el=([0-9.]+) taylor_ns_el=([0-9.]+) speedup_taylor=([0-9.]+) frozen_maxulp=(\d+) taylor_maxulp=(\d+) frozen_gt1=(\d+) taylor_gt1=(\d+)')
+          for line in p.read_text().splitlines():
+            m=rx.search(line)
+            if m: rows.append((m.group(1),int(m.group(2)),float(m.group(4)),float(m.group(5)),float(m.group(6)),int(m.group(7)),int(m.group(8)),int(m.group(9)),int(m.group(10))))
+          print('SUMMARY cells=',len(rows))
+          if len(rows)!=24: raise SystemExit(f'expected 24 cells, got {len(rows)}')
+          print('SUMMARY taylor_speed_wins=',sum(r[4]>1 for r in rows),'of=24')
+          print('SUMMARY median_speedup_taylor=',f'{statistics.median(r[4] for r in rows):.6f}')
+          print('SUMMARY min_speedup_taylor=',f'{min(r[4] for r in rows):.6f}','max=',f'{max(r[4] for r in rows):.6f}')
+          print('SUMMARY frozen_overall_maxulp=',max(r[5] for r in rows),'taylor_overall_maxulp=',max(r[6] for r in rows))
+          print('SUMMARY frozen_total_gt1=',sum(r[7] for r in rows),'taylor_total_gt1=',sum(r[8] for r in rows))
+          for rg in ('0-1','1-500','500-10000'):
+            q=[r for r in rows if r[0]==rg]
+            print('RANGE_SUMMARY range=',rg,'wins=',sum(r[4]>1 for r in q),'median_speedup=',f'{statistics.median(r[4] for r in q):.6f}','frozen_maxulp=',max(r[5] for r in q),'taylor_maxulp=',max(r[6] for r in q),'taylor_gt1=',sum(r[8] for r in q))
+          PY
+
+      - name: Upload result
+        if: steps.gate.outputs.eligible == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sine53-taylor-vs-frozen-${{ matrix.slot }}
+          path: /tmp/s53cmp/results.txt
+          if-no-files-found: error
