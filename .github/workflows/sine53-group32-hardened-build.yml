@@ -1,0 +1,148 @@
+name: SINE53 accurate hardened binary
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ release/sine53-group32-binary-20260914 ]
+    paths:
+      - '.github/workflows/sine53-group32-hardened-build.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      FLINT_PREFIX: /home/runner/flint36
+      SOURCE_DATE_EPOCH: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install prerequisites
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \( -iname '*microsoft*' -o -iname '*azure*' \) -delete || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential binutils file libgmp-dev libmpfr-dev python3 curl xz-utils gpg-agent wget ca-certificates
+          wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg >/dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main' | sudo tee /etc/apt/sources.list.d/oneAPI.list >/dev/null
+          sudo apt-get update -qq
+
+      - name: Restore Intel oneAPI
+        id: oneapi
+        uses: actions/cache@v4
+        with:
+          path: /opt/intel/oneapi
+          key: sine53-oneapi-compiler-mkl-ipp-svml-2026.1-v1
+
+      - name: Install Intel oneAPI on cache miss
+        if: steps.oneapi.outputs.cache-hit != 'true'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: sudo apt-get install -y --no-install-recommends intel-oneapi-mkl-devel intel-oneapi-compiler-dpcpp-cpp intel-oneapi-ipp-devel
+
+      - name: Restore FLINT 3.6.0
+        id: flint
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/flint36
+          key: flint-3.6.0-ubuntu24-x86_64-native-cd49f6116fb977da331dbb6627f4998397730a62253bd7a70a201ad5a00576d7-v2
+
+      - name: Install FLINT on cache miss
+        if: steps.flint.outputs.cache-hit != 'true'
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          curl -L --fail --retry 3 -o /tmp/flint.tar.xz https://github.com/flintlib/flint/releases/download/v3.6.0/flint-3.6.0.tar.xz
+          echo '134d39731a6dd926254625d646d85bf5990c68a3f2326cd54d2a6983e3e11dd8  /tmp/flint.tar.xz' | sha256sum -c -
+          tar -xf /tmp/flint.tar.xz -C /tmp
+          cd /tmp/flint-3.6.0
+          CFLAGS='-O3 -march=x86-64-v3 -DNDEBUG' ./configure --prefix="$FLINT_PREFIX"
+          make -j2 >/dev/null
+          make install >/dev/null
+
+      - name: Build exact accurate candidate and audit binary
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('release/build_s53_hardened.sh')
+          s=p.read_text()
+          old="""cp sine53_x67_wide_production.c generated_x67.c
+          python3 sine53_production_inject_wide3200.py generated_x67.c"""
+          new="""git fetch origin experiment/sine53-x67-ulp-fix:refs/remotes/origin/experiment/sine53-x67-ulp-fix
+          git show 9f4b58c18eecb99c9220099eb0cd312702400e8f:sine53_x67_wide_production.c > /tmp/base_x67.c
+          git show 4be45cee282f747dbb35f9de7d0f5ffa481cef8c:experiments/x67_accuracy_variant.py > /tmp/x67_accuracy_variant.py
+          python3 /tmp/x67_accuracy_variant.py /tmp/base_x67.c /tmp/baseline.c baseline
+          cp /tmp/rare_c0_group32.c generated_x67.c"""
+          if old not in s: raise SystemExit('X67 source block not found')
+          s=s.replace(old,new,1)
+          oldc="COMMON='-O3 -xHost -qopt-zmm-usage=high -fp-model=precise -fno-math-errno -DNDEBUG'"
+          newc="COMMON='-O3 -xGRANITERAPIDS -qopt-zmm-usage=high -fp-model=precise -fno-math-errno -DNDEBUG'"
+          if oldc not in s: raise SystemExit('compiler target line not found')
+          s=s.replace(oldc,newc,1)
+          oldrm='rm -f /tmp/s53release/ref_u.so /tmp/s53release/ref_w.so /tmp/s53release/*.o'
+          if oldrm not in s: raise SystemExit('cleanup line not found')
+          s=s.replace(oldrm,'rm -f /tmp/s53release/*.o',1)
+          p.write_text(s)
+          PY
+          bash release/build_s53_hardened.sh
+          LIB=/tmp/s53release/libs53.so
+          echo '--- FINAL EXPORTS ---'
+          nm -D --defined-only "$LIB"
+          echo '--- FINAL DEPENDENCIES ---'
+          readelf -d "$LIB" | grep NEEDED || true
+          echo '--- FINAL HASH ---'
+          cat /tmp/s53release/SHA256.txt
+          echo '--- EXTRA LEAK SCAN ---'
+          if strings -a "$LIB" | grep -Eiq '(chatgpt|openai|gpt[-_ ]?[0-9]|anthropic|claude|gemini|copilot|artificial intelligence|ai[-_ ]generated|factorized|direct_tail|rare_c0|group32|github|workflow|draft|benchmark|generated|mode.?5|secant|x50|x67|s53f|s53w|sine53_|flint|mpfr|gmp|mkl|ipp|svml|oneapi|octant_eval|kernel_create|redtab|/home/runner|/tmp/)'; then
+            echo FORBIDDEN_RELEASE_STRING_FOUND >&2; exit 1
+          fi
+          if readelf -S "$LIB" | grep -Eq '\.(debug|symtab|strtab|comment)'; then echo FORBIDDEN_SECTION >&2; exit 1; fi
+          if readelf -n "$LIB" | grep -qi 'Build ID'; then echo FORBIDDEN_BUILD_ID >&2; exit 1; fi
+
+      - name: Verify hardening has no measurable throughput tax
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          cat > /tmp/parity_perf.cpp <<'CPP'
+          #include <dlfcn.h>
+          #include <algorithm>
+          #include <cmath>
+          #include <cstdint>
+          #include <cstdio>
+          #include <cstdlib>
+          #include <pthread.h>
+          #include <sched.h>
+          #include <time.h>
+          #include <vector>
+          using RI=int(*)(void); using RE=void(*)(double*,const double*,size_t);
+          using PI=int(*)(void); using PE=void(*)(double*,const double*,size_t,unsigned); using PC=void(*)(void);
+          struct R{void*h;RI i;RE e;}; struct P{void*h;PI i;PE e;PC c;};
+          static R lr(const char*p){R z{};z.h=dlopen(p,RTLD_NOW|RTLD_LOCAL);if(!z.h)std::exit(2);z.i=(RI)dlsym(z.h,"sine53_engine_init");z.e=(RE)dlsym(z.h,"sine53_engine_eval");if(!z.i||!z.e||!z.i())std::exit(3);return z;}
+          static P lp(){P z{};z.h=dlopen("/tmp/s53release/libs53.so",RTLD_NOW|RTLD_LOCAL);if(!z.h)std::exit(4);z.i=(PI)dlsym(z.h,"s53_init");z.e=(PE)dlsym(z.h,"s53_eval");z.c=(PC)dlsym(z.h,"s53_close");if(!z.i||!z.e||!z.c||!z.i())std::exit(5);return z;}
+          static uint64_t mx(uint64_t x){x+=0x9e3779b97f4a7c15ULL;x=(x^(x>>30))*0xbf58476d1ce4e5b9ULL;x=(x^(x>>27))*0x94d049bb133111ebULL;return x^(x>>31);} static double now(){timespec t;clock_gettime(CLOCK_MONOTONIC_RAW,&t);return t.tv_sec*1e9+t.tv_nsec;} static double med(double*a){std::sort(a,a+7);return a[3];} static volatile double sink;
+          static void fill(std::vector<double>&x,int band){double lo=band==0?0.0:(band==1?1.0:500.0),hi=band==0?1.0:(band==1?500.0:10000.0);for(size_t i=0;i<x.size();i++){double u=(double)(mx(i+0x5319ULL)>>11)*0x1p-53;double v=lo+(hi-lo)*u;x[i]=(i&1)?-v:v;}}
+          static double rr(R&r,std::vector<double>&x,std::vector<double>&y,int reps){double t=now();for(int k=0;k<reps;k++)r.e(y.data(),x.data(),x.size());t=now()-t;sink+=y.back();return t/(reps*x.size());}
+          static double rp(P&p,std::vector<double>&x,std::vector<double>&y,unsigned prof,int reps){double t=now();for(int k=0;k<reps;k++)p.e(y.data(),x.data(),x.size(),prof);t=now()-t;sink+=y.back();return t/(reps*x.size());}
+          int main(){cpu_set_t s;CPU_ZERO(&s);CPU_SET(0,&s);if(pthread_setaffinity_np(pthread_self(),sizeof(s),&s))return 6;R u=lr("/tmp/s53release/ref_u.so"),w=lr("/tmp/s53release/ref_w.so");P p=lp();size_t ns[]={100,500,2000,8000,30000,70000,300000,1000000};double lg=0;int cells=0,wins=0;for(int band=0;band<3;band++)for(size_t n:ns){std::vector<double>x(n),a(n),b(n);fill(x,band);R&r=band? w:u;unsigned prof=band?1:0;int reps=(int)std::max<size_t>(8,8000000/n);rr(r,x,a,8);rp(p,x,b,prof,8);double A[7],B[7];for(int t=0;t<7;t++){if(t&1){B[t]=rp(p,x,b,prof,reps);A[t]=rr(r,x,a,reps);}else{A[t]=rr(r,x,a,reps);B[t]=rp(p,x,b,prof,reps);}}double x0=med(A),x1=med(B),q=x1/x0;lg+=std::log(q);cells++;wins+=q<1;std::printf("PARITY_SPEED band=%d n=%zu ref=%.9f hard=%.9f ratio=%.6f delta_pct=%+.3f\n",band,n,x0,x1,q,(q-1)*100.0);}double gm=std::exp(lg/cells);std::printf("PARITY_SPEED_OVERALL geomean_ratio=%.6f delta_pct=%+.3f wins=%d/%d sink=%.17g\n",gm,(gm-1)*100.0,wins,cells,(double)sink);p.c();return gm>1.01;}
+          CPP
+          CXX=/opt/intel/oneapi/compiler/latest/bin/icpx
+          "$CXX" -O3 -xGRANITERAPIDS -fp-model=precise /tmp/parity_perf.cpp -ldl -lpthread -lm -o /tmp/parity_perf
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:/opt/intel/oneapi/mkl/latest/lib:/opt/intel/oneapi/compiler/latest/lib:${LD_LIBRARY_PATH:-}"
+          taskset -c 0 /tmp/parity_perf | tee /tmp/s53release/hardening-performance.txt
+          rm -f /tmp/s53release/ref_u.so /tmp/s53release/ref_w.so
+
+      - name: Upload hardened evaluation package
+        uses: actions/upload-artifact@v4
+        with:
+          name: sine53-accurate-hardened-linux-x86_64-graniterapids
+          path: |
+            /tmp/s53release/libs53.so
+            /tmp/s53release/s53.h
+            /tmp/s53release/USAGE.txt
+            /tmp/s53release/SHA256.txt
+            /tmp/s53release/audit.txt
+            /tmp/s53release/accuracy.txt
+            /tmp/s53release/performance.csv
+            /tmp/s53release/hardening-performance.txt
+          if-no-files-found: error
+          retention-days: 30
