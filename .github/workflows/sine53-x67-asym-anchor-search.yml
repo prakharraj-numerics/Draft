@@ -5,7 +5,12 @@ on:
     paths:
       - '.github/workflows/sine53-x67-asym-anchor-search.yml'
       - 'experiments/x67_asym_anchor_variant.py'
+      - 'experiments/x67_accuracy_scan.cpp'
   workflow_dispatch:
+
+concurrency:
+  group: sine53-x67-asym-anchor-search
+  cancel-in-progress: true
 
 jobs:
   search:
@@ -117,11 +122,12 @@ jobs:
           LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
           export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:$MKLROOT/lib:/opt/intel/oneapi/compiler/latest/lib:${LD_LIBRARY_PATH:-}"
           : > /tmp/asym/results.txt
+          rm -f /tmp/asym/refs.bin
           for src in /tmp/asym/*.c; do
             tag=$(basename "$src" .c)
             "$CC" $COMMON $INC -DSINE53_GENERATED_SOURCE=\"$src\" -c sine53_engine_adapter.c -o /tmp/asym/$tag.o
             "$CXX" -std=c++17 $COMMON experiments/x67_accuracy_scan.cpp /tmp/asym/$tag.o -o /tmp/asym/$tag $LIBS
-            taskset -c 0 /tmp/asym/$tag "$tag" | tee -a /tmp/asym/results.txt
+            taskset -c 0 /tmp/asym/$tag "$tag" /tmp/asym/refs.bin | tee -a /tmp/asym/results.txt
           done
           python3 - <<'PY'
           import re
