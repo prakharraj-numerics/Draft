@@ -2,6 +2,7 @@
 from pathlib import Path
 import sys
 
+# Literal scalar if/else experiment trigger.
 if len(sys.argv)!=3:
     raise SystemExit('usage: x67_literal_ifelse_variant.py INPUT OUTPUT')
 src,out=sys.argv[1:]
