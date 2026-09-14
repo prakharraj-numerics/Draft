@@ -95,17 +95,19 @@ jobs:
         run: |
           set -euo pipefail
           source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 || true
-          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:${LD_LIBRARY_PATH:-}"
-          MKLROOT=/opt/intel/oneapi/mkl/latest; CC=gcc
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          CC=/opt/intel/oneapi/compiler/latest/bin/icx
+          CXX=/opt/intel/oneapi/compiler/latest/bin/icpx
           INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
-          COMMON='-O3 -march=native -mfma -mavx512f -fno-math-errno -fPIC'
+          COMMON='-O3 -xHost -qopt-zmm-usage=high -fp-model=precise -fno-math-errno'
           LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
-          g++ -O3 -std=c++17 experiments/x67_accuracy_scan.cpp -lmpfr -lgmp -ldl -o /tmp/x67fix/scan
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:$MKLROOT/lib:/opt/intel/oneapi/compiler/latest/lib:${LD_LIBRARY_PATH:-}"
           : > /tmp/x67fix/results.txt
           for src in /tmp/x67fix/*.c; do
             m=$(basename "$src" .c)
-            $CC $COMMON $INC -DSINE53_GENERATED_SOURCE=\"$src\" -shared sine53_engine_adapter.c $LIBS -o /tmp/x67fix/$m.so
-            taskset -c 0 /tmp/x67fix/scan /tmp/x67fix/$m.so $m | tee -a /tmp/x67fix/results.txt
+            "$CC" $COMMON $INC -DSINE53_GENERATED_SOURCE=\"$src\" -c sine53_engine_adapter.c -o /tmp/x67fix/$m.o
+            "$CXX" -std=c++17 $COMMON experiments/x67_accuracy_scan.cpp /tmp/x67fix/$m.o -o /tmp/x67fix/$m $LIBS
+            taskset -c 0 /tmp/x67fix/$m $m | tee -a /tmp/x67fix/results.txt
           done
           cat /tmp/x67fix/results.txt
       - uses: actions/upload-artifact@v4
