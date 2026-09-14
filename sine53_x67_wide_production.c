@@ -6,7 +6,7 @@
 
 /*
  * v2: cosine-style guarded pi/4 octant reducer for binary64 sine.
- * Mathematical evaluator is unchanged Mode-5/secant-spine degree 5.
+ * EXPERIMENT: same anchors/reduction, direct local sine-Taylor degree 5.
  *
  * Normal path:
  *   |x|<1       -> direct winning unit-domain evaluator, no wide reduction.
@@ -85,10 +85,11 @@ OVEC static inline __m512d mode5_poly_i32_low(const s53w_kernel *k,
    that fact to icx: direct nearest conversion gives the gather index, the
    aligned plane-major table is retained, and Horner is explicitly unrolled.
    Numerical FMA order is identical to v8. */
-OVEC static inline __m512d mode5_poly_x11(const s53w_kernel *k,__m512d y,
-                                          __mmask8 signmask)
+OVEC static inline __m512d taylor_poly_x11(const s53w_kernel *k,__m512d y,
+                                           __mmask8 signmask)
 {
     const __m512d VK=_mm512_set1_pd(KGRID),VIK=_mm512_set1_pd(INVK),Z=_mm512_setzero_pd();
+    const __m512d ONE=_mm512_set1_pd(1.0);
     const __m512d MH=_mm512_set1_pd(-0.5),M6=_mm512_set1_pd(-1.0/6.0);
     const __m512d C24=_mm512_set1_pd(1.0/24.0),C120=_mm512_set1_pd(1.0/120.0);
     const double *tab=(const double *)__builtin_assume_aligned(k->tab,64);
@@ -96,25 +97,28 @@ OVEC static inline __m512d mode5_poly_x11(const s53w_kernel *k,__m512d y,
     __m256i ji=_mm512_cvt_roundpd_epi32(sy,_MM_FROUND_TO_NEAREST_INT|_MM_FROUND_NO_EXC);
     __m512d jd=_mm512_cvtepi32_pd(ji);
     __m512d d=_mm512_fnmadd_pd(jd,VIK,y);
-    __m512d c0=_mm512_i32gather_pd(ji,tab+0*LUTN,8);
-    __m512d c1=_mm512_i32gather_pd(ji,tab+1*LUTN,8);
-    __m512d c2=_mm512_mul_pd(c0,MH);
-    __m512d c3=_mm512_mul_pd(c1,M6);
-    __m512d c4=_mm512_mul_pd(c0,C24);
-    __m512d c5=_mm512_mul_pd(c1,C120);
-    __m512d p=_mm512_fmadd_pd(c5,d,c4);
-    p=_mm512_fmadd_pd(p,d,c3);
-    p=_mm512_fmadd_pd(p,d,c2);
-    p=_mm512_fmadd_pd(p,d,c1);
-    p=_mm512_fmadd_pd(p,d,c0);
+    __m512d s=_mm512_i32gather_pd(ji,tab+0*LUTN,8);
+    __m512d c=_mm512_i32gather_pd(ji,tab+1*LUTN,8);
+
+    /* Direct local Taylor architecture.  A and B are independent chains. */
+    __m512d z=_mm512_mul_pd(d,d);
+    __m512d A=_mm512_fmadd_pd(z,C24,MH);
+    __m512d B=_mm512_fmadd_pd(z,C120,M6);
+    A=_mm512_fmadd_pd(z,A,ONE);
+    B=_mm512_fmadd_pd(z,B,ONE);
+
+    __m512d dc=_mm512_mul_pd(d,c);
+    __m512d sA=_mm512_mul_pd(s,A);
+    __m512d p=_mm512_fmadd_pd(dc,B,sA);
     return _mm512_mask_sub_pd(p,signmask,Z,p);
 }
 
-OVEC static inline __m512d mode5_poly_low_x11(const s53w_kernel *k,
+OVEC static inline __m512d taylor_poly_low_x11(const s53w_kernel *k,
                                                __m512d yh,__m512d yl,
                                                __mmask8 signmask)
 {
     const __m512d VK=_mm512_set1_pd(KGRID),VIK=_mm512_set1_pd(INVK),Z=_mm512_setzero_pd();
+    const __m512d ONE=_mm512_set1_pd(1.0);
     const __m512d MH=_mm512_set1_pd(-0.5),M6=_mm512_set1_pd(-1.0/6.0);
     const __m512d C24=_mm512_set1_pd(1.0/24.0),C120=_mm512_set1_pd(1.0/120.0);
     const double *tab=(const double *)__builtin_assume_aligned(k->tab,64);
@@ -124,17 +128,19 @@ OVEC static inline __m512d mode5_poly_low_x11(const s53w_kernel *k,
     __m512d jd=_mm512_cvtepi32_pd(ji);
     __m512d d=_mm512_sub_pd(yh,_mm512_mul_pd(jd,VIK));
     d=_mm512_add_pd(d,yl);
-    __m512d c0=_mm512_i32gather_pd(ji,tab+0*LUTN,8);
-    __m512d c1=_mm512_i32gather_pd(ji,tab+1*LUTN,8);
-    __m512d c2=_mm512_mul_pd(c0,MH);
-    __m512d c3=_mm512_mul_pd(c1,M6);
-    __m512d c4=_mm512_mul_pd(c0,C24);
-    __m512d c5=_mm512_mul_pd(c1,C120);
-    __m512d p=_mm512_fmadd_pd(c5,d,c4);
-    p=_mm512_fmadd_pd(p,d,c3);
-    p=_mm512_fmadd_pd(p,d,c2);
-    p=_mm512_fmadd_pd(p,d,c1);
-    p=_mm512_fmadd_pd(p,d,c0);
+    __m512d s=_mm512_i32gather_pd(ji,tab+0*LUTN,8);
+    __m512d c=_mm512_i32gather_pd(ji,tab+1*LUTN,8);
+
+    /* Same polynomial as taylor_poly_x11; retain the low reduction word. */
+    __m512d z=_mm512_mul_pd(d,d);
+    __m512d A=_mm512_fmadd_pd(z,C24,MH);
+    __m512d B=_mm512_fmadd_pd(z,C120,M6);
+    A=_mm512_fmadd_pd(z,A,ONE);
+    B=_mm512_fmadd_pd(z,B,ONE);
+
+    __m512d dc=_mm512_mul_pd(d,c);
+    __m512d sA=_mm512_mul_pd(s,A);
+    __m512d p=_mm512_fmadd_pd(dc,B,sA);
     return _mm512_mask_sub_pd(p,signmask,Z,p);
 }
 
@@ -169,7 +175,7 @@ OVEC static void octant_vector_v11_single(const s53w_kernel *k,
         __m512d ax=_mm512_castsi512_pd(_mm512_and_epi64(vxi,ABSM));
         __mmask8 unit=(__mmask8)(_mm512_cmp_pd_mask(ax,ONE,_CMP_LT_OQ)&active);
         if(__builtin_expect(unit==active,0)){
-            __m512d p=mode5_poly_x11(k,ax,inneg);
+            __m512d p=taylor_poly_x11(k,ax,inneg);
             _mm512_mask_storeu_pd(out+i,active,p);continue;
         }
         __mmask8 wide=(__mmask8)(active&~unit);
@@ -199,7 +205,7 @@ OVEC static void octant_vector_v11_single(const s53w_kernel *k,
         rh=_mm512_mask_mov_pd(rh,unit,ax);rl=_mm512_mask_mov_pd(rl,unit,Z);
         rh=_mm512_mask_mov_pd(rh,guarded,Z);rl=_mm512_mask_mov_pd(rl,guarded,Z);
         __mmask8 signmask=(__mmask8)(inneg^wide_neg);
-        __m512d p=mode5_poly_low_x11(k,rh,rl,signmask);
+        __m512d p=taylor_poly_low_x11(k,rh,rl,signmask);
         _mm512_mask_storeu_pd(out+i,active,p);
         if(__builtin_expect(guarded!=0,0)){
             for(unsigned lane=0;lane<8&&i+lane<n;lane++)
@@ -353,8 +359,8 @@ OVEC static void octant_vector_x20_tail(const s53w_kernel *k,
         /* Phase 2: homogeneous Mode-5 work; same six coefficients/FMA order. */
         for(size_t b=0;b<blocks;b++){
             __m512d rh=_mm512_load_pd(rhbuf+b*8),rl=_mm512_load_pd(rlbuf+b*8);
-            __m512d p=unitbuf[b]?mode5_poly_x11(k,rh,(__mmask8)signbuf[b]):
-                                    mode5_poly_low_x11(k,rh,rl,(__mmask8)signbuf[b]);
+            __m512d p=unitbuf[b]?taylor_poly_x11(k,rh,(__mmask8)signbuf[b]):
+                                    taylor_poly_low_x11(k,rh,rl,(__mmask8)signbuf[b]);
             _mm512_mask_storeu_pd(out+tile+b*8,(__mmask8)activebuf[b],p);
         }
         /* Phase 3: rare exact v8 scalar repair. */
