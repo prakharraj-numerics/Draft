@@ -95,10 +95,10 @@ jobs:
         run: |
           set -euo pipefail
           source /opt/intel/oneapi/setvars.sh >/dev/null 2>&1 || true
-          export LD_LIBRARY_PATH="/opt/intel/oneapi/compiler/latest/lib:$FLINT_PREFIX/lib:${LD_LIBRARY_PATH:-}"
-          MKLROOT=/opt/intel/oneapi/mkl/latest; CC=/opt/intel/oneapi/compiler/latest/bin/icx
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+          MKLROOT=/opt/intel/oneapi/mkl/latest; CC=gcc
           INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
-          COMMON='-O3 -xHost -qopt-zmm-usage=high -fp-model=precise -fno-math-errno -fPIC'
+          COMMON='-O3 -march=native -mfma -mavx512f -fno-math-errno -fPIC'
           LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
           g++ -O3 -std=c++17 experiments/x67_accuracy_scan.cpp -lmpfr -lgmp -ldl -o /tmp/x67fix/scan
           : > /tmp/x67fix/results.txt
