@@ -80,11 +80,9 @@ OVEC static inline __m512d mode5_poly_i32_low(const s53w_kernel *k,
 }
 
 
-/* Xeon v11: instruction-level realization of the same degree-5 Mode-5
-   evaluator. The profile is fixed at terms=2/degree=5 for binary64, so expose
-   that fact to icx: direct nearest conversion gives the gather index, the
-   aligned plane-major table is retained, and Horner is explicitly unrolled.
-   Numerical FMA order is identical to v8. */
+/* Experimental Taylor hot path: preserve the same 1/256 anchor lookup
+   and degree-5 local polynomial, but evaluate the even/odd Taylor pieces as
+   two independent quadratics in d^2 instead of one serial Horner chain. */
 OVEC static inline __m512d taylor_poly_x11(const s53w_kernel *k,__m512d y,
                                            __mmask8 signmask)
 {
