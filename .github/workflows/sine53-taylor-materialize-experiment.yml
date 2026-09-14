@@ -1,0 +1,51 @@
+name: SINE53 materialize Taylor experiment
+
+on:
+  push:
+    branches:
+      - experiment/sine53-taylor-architecture
+    paths:
+      - tools/taylorize_sine53_experiment.py
+      - .github/workflows/sine53-taylor-materialize-experiment.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout experimental branch
+        uses: actions/checkout@v4
+        with:
+          ref: experiment/sine53-taylor-architecture
+          fetch-depth: 0
+
+      - name: Install direct local Taylor hot path
+        run: python3 tools/taylorize_sine53_experiment.py
+
+      - name: Verify experiment is narrowly scoped
+        shell: bash
+        run: |
+          set -euo pipefail
+          changed="$(git diff --name-only)"
+          printf '%s\n' "$changed"
+          test "$changed" = $'sine53_x50_unit_production.c\nsine53_x67_wide_production.c' || {
+            echo "Unexpected changed-file set" >&2
+            exit 1
+          }
+          grep -q 'taylor_poly_x11' sine53_x50_unit_production.c
+          grep -q 'taylor_poly_low_x11' sine53_x50_unit_production.c
+          grep -q 'taylor_poly_x11' sine53_x67_wide_production.c
+          grep -q 'taylor_poly_low_x11' sine53_x67_wide_production.c
+
+      - name: Commit materialized experimental sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add sine53_x50_unit_production.c sine53_x67_wide_production.c
+          git commit -m 'Experiment: use factored local Taylor hot path in X50/X67'
+          git push origin HEAD:experiment/sine53-taylor-architecture
