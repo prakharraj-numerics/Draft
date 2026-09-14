@@ -102,6 +102,16 @@ jobs:
           sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
           sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
           git show "$BASE":sine53_x67_wide_production.c > /tmp/frozen.c
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/frozen.c')
+          s=p.read_text()
+          old='\nint main(void)\n{'
+          new='\nint sine53_x67_disabled_main(void)\n{'
+          if s.count(old)!=1:
+              raise SystemExit(f'x67 driver main marker count={s.count(old)}')
+          p.write_text(s.replace(old,new,1))
+          PY
 
       - name: Build and signed-scan original frozen X67
         if: steps.gate.outputs.eligible == '1'
