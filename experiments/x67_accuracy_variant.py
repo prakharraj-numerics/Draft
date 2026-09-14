@@ -47,6 +47,15 @@ def inject_c0(t,threshold):
     new=gate+'\n'+'\n'.join(indent+x for x in body)+close+'''\n            pv[g]=_mm512_mask_sub_pd(pv[g],sg[g],Z,pv[g]);\n            _mm512_storeu_pd(out+i+8*g,pv[g]);'''
     return t.replace(old,new,1)
 
+def inject_c0_group32(t):
+    loop='''        /* Same degree-5 polynomial, algebraically grouped into independent\n           even/odd d^2 chains: much shorter dependency chain than Horner. */\n        for(int g=0;g<4;g++){'''
+    if t.count(loop)!=1: raise SystemExit('group loop count')
+    t=t.replace(loop,'''        /* Same degree-5 polynomial, algebraically grouped into independent\n           even/odd d^2 chains: much shorter dependency chain than Horner. */\n        unsigned x67_pack=0;\n        for(int g=0;g<4;g++){''',1)
+    old='''            pv[g]=_mm512_fmadd_pd(z,inner,base);\n            pv[g]=_mm512_mask_sub_pd(pv[g],sg[g],Z,pv[g]);\n            _mm512_storeu_pd(out+i+8*g,pv[g]);\n        }'''
+    if t.count(old)!=1: raise SystemExit('group body count')
+    new='''            pv[g]=_mm512_fmadd_pd(z,inner,base);\n            __mmask8 x67_edge=_mm512_cmp_pd_mask(c0[g],_mm512_set1_pd(0x1.921d1fcdec784p-7),_CMP_EQ_OQ);\n            x67_pack|=((unsigned)x67_edge)<<(8*g);\n            pv[g]=_mm512_mask_sub_pd(pv[g],sg[g],Z,pv[g]);\n            _mm512_storeu_pd(out+i+8*g,pv[g]);\n        }\n        if(__builtin_expect(x67_pack!=0,0)){\n            const __m512d DH=_mm512_set1_pd(0x1.921fb54442d18p-7);\n            const __m512d DL=_mm512_set1_pd(0x1.1a62633145c07p-61);\n            const __m512d N5040=_mm512_set1_pd(-1.0/5040.0);\n            const __m512i ABSM67=_mm512_set1_epi64((long long)UINT64_C(0x7fffffffffffffff));\n            for(int g=0;g<4;g++){\n                __mmask8 x67_fix=(__mmask8)(x67_pack>>(8*g));\n                if(!x67_fix) continue;\n                __m512d ap=_mm512_castsi512_pd(_mm512_and_epi64(_mm512_castpd_si512(pv[g]),ABSM67));\n                x67_fix=(__mmask8)(x67_fix&_mm512_cmp_pd_mask(ap,_mm512_set1_pd(0x1.d14e3bcd35a86p-7),_CMP_GE_OQ));\n                if(!x67_fix) continue;\n                __mmask8 m510=(__mmask8)(_mm512_movepi64_mask(_mm512_castpd_si512(c1[g]))&x67_fix);\n                __m512d b=_mm512_mask_sub_pd(d[g],m510,Z,d[g]);\n                __m512d rh=_mm512_add_pd(DH,b);\n                __m512d re=_mm512_sub_pd(b,_mm512_sub_pd(rh,DH));\n                __m512d rl=_mm512_add_pd(re,DL);\n                __m512d zz=_mm512_mul_pd(rh,rh);\n                __m512d pp=_mm512_fmadd_pd(zz,N5040,C120);\n                pp=_mm512_fmadd_pd(zz,pp,M6);\n                __m512d alt=_mm512_fmadd_pd(_mm512_mul_pd(rh,zz),pp,rh);\n                alt=_mm512_add_pd(alt,rl);\n                alt=_mm512_mask_sub_pd(alt,sg[g],Z,alt);\n                _mm512_mask_storeu_pd(out+i+8*g,x67_fix,alt);\n            }\n        }'''
+    return t.replace(old,new,1)
+
 def finish(t):
     q='\nint main(void)\n{'
     if t.count(q)!=1: raise SystemExit('main count')
@@ -54,10 +63,10 @@ def finish(t):
 
 extra={}
 if mode=='baseline':
-    # Names retained because the existing speed workflow consumes these two files.
-    # Both now use the cheap already-gathered c0 discriminator.
-    extra['direct_tail142']=inject_c0(s,False)
-    extra['direct_tail142_dd']=inject_c0(s,True)
+    # Existing filenames are retained so the current speed/accuracy workflows
+    # compare baseline, the per-8 detector, and the amortized per-32 detector.
+    extra['direct_tail142']=inject_c0(s,True)
+    extra['direct_tail142_dd']=inject_c0_group32(s)
 elif mode=='base_add':
     a='__m512d base=_mm512_fmadd_pd(c1[g],d[g],c0[g]);'
     if s.count(a)!=1: raise SystemExit('base')
