@@ -83,6 +83,16 @@ jobs:
           set -euo pipefail
           BASE=9f4b58c18eecb99c9220099eb0cd312702400e8f
           mkdir -p /tmp/x67speed
+          git fetch origin backup-pre-cleanup-20260830:refs/remotes/origin/backup-pre-cleanup-20260830
+          git show origin/backup-pre-cleanup-20260830:bench_sine_53_wide_fast2.c > bench_sine_53_wide_fast2.c
+          git show origin/backup-pre-cleanup-20260830:bench_sine_53_wide_intel.c > bench_sine_53_wide_intel.c
+          git show origin/backup-pre-cleanup-20260830:sine_53_coeff_source.c > sine_53_coeff_source.c
+          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
+          sed -i 's/int main(void)/int s53w_disabled_main(void)/' bench_sine_53_wide_intel.c
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
           git show "$BASE":sine53_x67_wide_production.c > /tmp/x67speed/base.c
           python3 experiments/x67_accuracy_variant.py /tmp/x67speed/base.c /tmp/x67speed/baseline.c baseline
           python3 - <<'PY'
