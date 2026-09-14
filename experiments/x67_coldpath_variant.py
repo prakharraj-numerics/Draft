@@ -8,150 +8,50 @@ if mode not in ('nested_band','broad_hi','flat_band'):
     raise SystemExit('bad mode '+mode)
 s = Path(src).read_text()
 
-helper = r'''
-OVEC __attribute__((noinline,cold)) static __m512d x67_rare_small_repair(
-        __m512d rh,__m512d rl,__mmask8 signmask)
-{
-    const __m512d Z=_mm512_setzero_pd();
-    const __m512d M6=_mm512_set1_pd(-1.0/6.0);
-    const __m512d C120=_mm512_set1_pd(1.0/120.0);
-    const __m512d N5040=_mm512_set1_pd(-1.0/5040.0);
-    __m512d z=_mm512_mul_pd(rh,rh);
-    __m512d p=_mm512_fmadd_pd(z,N5040,C120);
-    p=_mm512_fmadd_pd(z,p,M6);
-    __m512d y=_mm512_fmadd_pd(_mm512_mul_pd(rh,z),p,rh);
-    y=_mm512_add_pd(y,rl);
-    return _mm512_mask_sub_pd(y,signmask,Z,y);
-}
+# The production dispatcher sends every n>=32 call directly to rawx67.  The
+# previous experiment mistakenly attached its guard to x12/general, so the
+# 8192-point accuracy chunks bypassed the repair entirely.  Patch ONLY rawx67.
+raw_mark = 'OVEC __attribute__((noinline,hot,aligned(64))) static void octant_vector_v8_rawx67('
+raw_end_mark = 'static const double x65_s[512]'
+if s.count(raw_mark) != 1 or s.count(raw_end_mark) != 1:
+    raise SystemExit('rawx67 markers')
+a = s.index(raw_mark)
+b = s.index(raw_end_mark, a)
+pre, raw, post = s[:a], s[a:b], s[b:]
 
-'''
-marker='OVEC static inline void x12_prepare_block(const double * __restrict x,size_t base,size_t n,'
-if s.count(marker) != 1:
-    raise SystemExit('x12 marker count')
-s=s.replace(marker,helper+marker,1)
+loop = '''        /* Same degree-5 polynomial, algebraically grouped into independent\n           even/odd d^2 chains: much shorter dependency chain than Horner. */\n        for(int g=0;g<4;g++){'''
+if raw.count(loop) != 1:
+    raise SystemExit('raw polynomial loop count')
+raw = raw.replace(loop, '''        /* Keep the frozen X67 polynomial/store path unchanged.  Merely pack\n           suspect lane masks; a single unlikely branch after all four groups\n           enters the cold repair. */\n        unsigned x67_pack=0;\n        /* Same degree-5 polynomial, algebraically grouped into independent\n           even/odd d^2 chains: much shorter dependency chain than Horner. */\n        for(int g=0;g<4;g++){''', 1)
 
-# Change only the dedicated full-width x12 path.  Its existing near-zero compare
-# is already in the frozen hot path.  nested/broad reuse that compare as the
-# outer gate; flat preserves it and adds a branchless narrow accuracy mask.
-pos=s.index(marker)
-pre, tail=s[:pos], s[pos:]
-old = '''        __m512d ars=_mm512_castsi512_pd(_mm512_and_epi64(_mm512_castpd_si512(rs),ABSM));
-        __mmask8 repair=_mm512_cmp_pd_mask(ars,_mm512_set1_pd(0x1p-14),_CMP_LT_OQ);
-        if(__builtin_expect(repair!=0,0)){
-            const __m512d PI1=_mm512_set1_pd(0x1.921fb54400000p+1);
-            const __m512d PI2=_mm512_set1_pd(0x1.0b4611a600000p-33);
-            const __m512d PI3=_mm512_set1_pd(0x1.3198a2e037073p-68);
-            __m512d r0=_mm512_sub_pd(ax,_mm512_mul_pd(N,PI1));
-            __m512d rh3,re3; twodiff_cw(r0,_mm512_mul_pd(N,PI2),&rh3,&re3);
-            __m512d rl3=_mm512_fnmadd_pd(N,PI3,re3);
-            rh=_mm512_mask_mov_pd(rh,repair,rh3);
-            rl=_mm512_mask_mov_pd(rl,repair,rl3);
-            rs=_mm512_add_pd(rh,rl);
-        }
-'''
-if tail.count(old) != 1:
-    raise SystemExit('full-width repair block count')
-if mode == 'flat_band':
-    new = '''        __m512d ars=_mm512_castsi512_pd(_mm512_and_epi64(_mm512_castpd_si512(rs),ABSM));
-        __mmask8 repair=_mm512_cmp_pd_mask(ars,_mm512_set1_pd(0x1p-14),_CMP_LT_OQ);
-        __mmask8 accguard=(__mmask8)(_mm512_cmp_pd_mask(ars,_mm512_set1_pd(0x1.fc00000000000p-7),_CMP_LT_OQ)&
-                                    _mm512_cmp_pd_mask(ars,_mm512_set1_pd(0x1.cac083126e979p-7),_CMP_GT_OQ));
-        if(__builtin_expect(repair!=0,0)){
-            const __m512d PI1=_mm512_set1_pd(0x1.921fb54400000p+1);
-            const __m512d PI2=_mm512_set1_pd(0x1.0b4611a600000p-33);
-            const __m512d PI3=_mm512_set1_pd(0x1.3198a2e037073p-68);
-            __m512d r0=_mm512_sub_pd(ax,_mm512_mul_pd(N,PI1));
-            __m512d rh3,re3; twodiff_cw(r0,_mm512_mul_pd(N,PI2),&rh3,&re3);
-            __m512d rl3=_mm512_fnmadd_pd(N,PI3,re3);
-            rh=_mm512_mask_mov_pd(rh,repair,rh3);
-            rl=_mm512_mask_mov_pd(rl,repair,rl3);
-            rs=_mm512_add_pd(rh,rl);
-        }
-'''
-elif mode == 'nested_band':
-    new = '''        __m512d ars=_mm512_castsi512_pd(_mm512_and_epi64(_mm512_castpd_si512(rs),ABSM));
-        __mmask8 near=_mm512_cmp_pd_mask(ars,_mm512_set1_pd(0x1.fc00000000000p-7),_CMP_LT_OQ);
-        __mmask8 repair=0,accguard=0;
-        if(__builtin_expect(near!=0,0)){
-            repair=(__mmask8)(near&_mm512_cmp_pd_mask(ars,_mm512_set1_pd(0x1p-14),_CMP_LT_OQ));
-            accguard=(__mmask8)(near&_mm512_cmp_pd_mask(ars,_mm512_set1_pd(0x1.cac083126e979p-7),_CMP_GT_OQ));
-            if(repair){
-                const __m512d PI1=_mm512_set1_pd(0x1.921fb54400000p+1);
-                const __m512d PI2=_mm512_set1_pd(0x1.0b4611a600000p-33);
-                const __m512d PI3=_mm512_set1_pd(0x1.3198a2e037073p-68);
-                __m512d r0=_mm512_sub_pd(ax,_mm512_mul_pd(N,PI1));
-                __m512d rh3,re3; twodiff_cw(r0,_mm512_mul_pd(N,PI2),&rh3,&re3);
-                __m512d rl3=_mm512_fnmadd_pd(N,PI3,re3);
-                rh=_mm512_mask_mov_pd(rh,repair,rh3);
-                rl=_mm512_mask_mov_pd(rl,repair,rl3);
-                rs=_mm512_add_pd(rh,rl);
-            }
-        }
-'''
+needle = '''            pv[g]=_mm512_fmadd_pd(z,inner,base);\n            pv[g]=_mm512_mask_sub_pd(pv[g],sg[g],Z,pv[g]);'''
+if raw.count(needle) != 1:
+    raise SystemExit('raw result point count')
+
+if mode == 'nested_band':
+    # Accuracy-first reference: exact two-cell detector, no numerical band.
+    det = '''            __mmask8 x67_fix=(__mmask8)(mask_eq_i32(ji[g],2)|mask_eq_i32(ji[g],510));\n            x67_pack|=((unsigned)x67_fix)<<(8*g);'''
+elif mode == 'broad_hi':
+    # Exact symmetric cell detector plus the conservative residual tail that
+    # contains every observed 2-ULP failure.  |d| cannot exceed pi/1024 here.
+    det = '''            __m256i x67_delta=_mm256_abs_epi32(_mm256_sub_epi32(ji[g],_mm256_set1_epi32(256)));\n            __mmask8 x67_fix=mask_eq_i32(x67_delta,254);\n            __m512d x67_ad=_mm512_abs_pd(d[g]);\n            x67_fix=(__mmask8)(x67_fix&_mm512_cmp_pd_mask(x67_ad,_mm512_set1_pd(0x1.f212d77318fc5p-10),_CMP_GE_OQ));\n            x67_pack|=((unsigned)x67_fix)<<(8*g);'''
 else:
-    new = '''        __m512d ars=_mm512_castsi512_pd(_mm512_and_epi64(_mm512_castpd_si512(rs),ABSM));
-        __mmask8 near=_mm512_cmp_pd_mask(ars,_mm512_set1_pd(0x1.fc00000000000p-7),_CMP_LT_OQ);
-        __mmask8 repair=0,accguard=near;
-        if(__builtin_expect(near!=0,0)){
-            repair=(__mmask8)(near&_mm512_cmp_pd_mask(ars,_mm512_set1_pd(0x1p-14),_CMP_LT_OQ));
-            if(repair){
-                const __m512d PI1=_mm512_set1_pd(0x1.921fb54400000p+1);
-                const __m512d PI2=_mm512_set1_pd(0x1.0b4611a600000p-33);
-                const __m512d PI3=_mm512_set1_pd(0x1.3198a2e037073p-68);
-                __m512d r0=_mm512_sub_pd(ax,_mm512_mul_pd(N,PI1));
-                __m512d rh3,re3; twodiff_cw(r0,_mm512_mul_pd(N,PI2),&rh3,&re3);
-                __m512d rl3=_mm512_fnmadd_pd(N,PI3,re3);
-                rh=_mm512_mask_mov_pd(rh,repair,rh3);
-                rl=_mm512_mask_mov_pd(rl,repair,rl3);
-                rs=_mm512_add_pd(rh,rl);
-            }
-        }
-'''
-tail=tail.replace(old,new,1)
-oldout='''        *rh_out=rh; *rl_out=rl;
-        *sign_out=(__mmask8)(inneg^parity^rneg);
-        *guard_out=0; *active_out=0xff; *pure_unit_out=0; return;'''
-newout='''        *rh_out=rh; *rl_out=rl;
-        *sign_out=(__mmask8)(inneg^parity^rneg);
-        *guard_out=accguard; *active_out=0xff; *pure_unit_out=0; return;'''
-if tail.count(oldout)!=1:
-    raise SystemExit('guard output count')
-tail=tail.replace(oldout,newout,1)
-s=pre+tail
+    # Narrow final-result band around the localized vulnerable tail.  This is
+    # still evaluated before sign reconstruction, so abs() is only defensive.
+    det = '''            __mmask8 x67_fix=(__mmask8)(mask_eq_i32(ji[g],2)|mask_eq_i32(ji[g],510));\n            __m512d x67_ap=_mm512_abs_pd(pv[g]);\n            x67_fix=(__mmask8)(x67_fix&_mm512_cmp_pd_mask(x67_ap,_mm512_set1_pd(0x1.cac083126e979p-7),_CMP_GE_OQ));\n            x67_fix=(__mmask8)(x67_fix&_mm512_cmp_pd_mask(x67_ap,_mm512_set1_pd(0x1.fbe76c8b43958p-7),_CMP_LE_OQ));\n            x67_pack|=((unsigned)x67_fix)<<(8*g);'''
+raw = raw.replace(needle, '            pv[g]=_mm512_fmadd_pd(z,inner,base);\n'+det+'\n            pv[g]=_mm512_mask_sub_pd(pv[g],sg[g],Z,pv[g]);', 1)
 
-# Replace the already-existing cold hooks with the direct small-angle repair.
-old_tail='''        /* Phase 3: rare exact v8 scalar repair. */
-        for(size_t b=0;b<blocks;b++)if(__builtin_expect(guardbuf[b]!=0,0)){
-            __mmask8 g=(__mmask8)guardbuf[b];
-            for(unsigned lane=0;lane<8&&b*8+lane<tn;lane++)
-                if(g&(1u<<lane))out[tile+b*8+lane]=scalar2(k,x[tile+b*8+lane]);
-        }'''
-new_tail='''        /* Phase 3: rare direct small-angle repair. */
-        for(size_t b=0;b<blocks;b++)if(__builtin_expect(guardbuf[b]!=0,0)){
-            __mmask8 g=(__mmask8)guardbuf[b];
-            __m512d rh=_mm512_load_pd(rhbuf+b*8),rl=_mm512_load_pd(rlbuf+b*8);
-            __m512d alt=x67_rare_small_repair(rh,rl,(__mmask8)signbuf[b]);
-            _mm512_mask_storeu_pd(out+tile+b*8,g,alt);
-        }'''
-if s.count(old_tail)!=1:
-    raise SystemExit('tail cold hook count')
-s=s.replace(old_tail,new_tail,1)
+end = '''            _mm512_storeu_pd(out+i+8*g,pv[g]);\n        }\n    }\n    if(i<n) octant_vector_v8_x56_general(k,x+i,out+i,n-i);'''
+if raw.count(end) != 1:
+    raise SystemExit('raw loop end count')
 
-old_raw='''        if(__builtin_expect(g0!=0,0)) for(unsigned lane=0;lane<8;lane++) if(g0&(1u<<lane)) out[i+0+lane]=scalar2(k,x[i+0+lane]);
-        if(__builtin_expect(g1!=0,0)) for(unsigned lane=0;lane<8;lane++) if(g1&(1u<<lane)) out[i+8+lane]=scalar2(k,x[i+8+lane]);
-        if(__builtin_expect(g2!=0,0)) for(unsigned lane=0;lane<8;lane++) if(g2&(1u<<lane)) out[i+16+lane]=scalar2(k,x[i+16+lane]);
-        if(__builtin_expect(g3!=0,0)) for(unsigned lane=0;lane<8;lane++) if(g3&(1u<<lane)) out[i+24+lane]=scalar2(k,x[i+24+lane]);'''
-new_raw='''        if(__builtin_expect(g0!=0,0)){__m512d alt=x67_rare_small_repair(rh0,rl0,s0);_mm512_mask_storeu_pd(out+i+0,g0,alt);}
-        if(__builtin_expect(g1!=0,0)){__m512d alt=x67_rare_small_repair(rh1,rl1,s1);_mm512_mask_storeu_pd(out+i+8,g1,alt);}
-        if(__builtin_expect(g2!=0,0)){__m512d alt=x67_rare_small_repair(rh2,rl2,s2);_mm512_mask_storeu_pd(out+i+16,g2,alt);}
-        if(__builtin_expect(g3!=0,0)){__m512d alt=x67_rare_small_repair(rh3,rl3,s3);_mm512_mask_storeu_pd(out+i+24,g3,alt);}'''
-if s.count(old_raw)!=1:
-    raise SystemExit('raw cold hook count')
-s=s.replace(old_raw,new_raw,1)
+cold = '''            _mm512_storeu_pd(out+i+8*g,pv[g]);\n        }\n\n        /* True cold path: only suspect lanes are recomputed.  The common\n           result above is exactly the frozen X67 output. */\n        if(__builtin_expect(x67_pack!=0,0)){\n            const __m512d DH=_mm512_set1_pd(0x1.921fb54442d18p-7);\n            const __m512d DL=_mm512_set1_pd(0x1.1a62633145c07p-61);\n            const __m512d N5040=_mm512_set1_pd(-1.0/5040.0);\n            for(int g=0;g<4;g++){\n                __mmask8 x67_fix=(__mmask8)((x67_pack>>(8*g))&0xffu);\n                if(!x67_fix) continue;\n                __mmask8 m510=(__mmask8)(mask_eq_i32(ji[g],510)&x67_fix);\n                __m512d bb=_mm512_mask_sub_pd(d[g],m510,Z,d[g]);\n                __m512d rrh=_mm512_add_pd(DH,bb);\n                __m512d rre=_mm512_sub_pd(bb,_mm512_sub_pd(rrh,DH));\n                __m512d rrl=_mm512_add_pd(rre,DL);\n                __m512d zz=_mm512_mul_pd(rrh,rrh);\n                __m512d pp=_mm512_fmadd_pd(zz,N5040,C120);\n                pp=_mm512_fmadd_pd(zz,pp,M6);\n                __m512d alt=_mm512_fmadd_pd(_mm512_mul_pd(rrh,zz),pp,rrh);\n                alt=_mm512_add_pd(alt,rrl);\n                alt=_mm512_mask_sub_pd(alt,sg[g],Z,alt);\n                _mm512_mask_storeu_pd(out+i+8*g,x67_fix,alt);\n            }\n        }\n    }\n    if(i<n) octant_vector_v8_x56_general(k,x+i,out+i,n-i);'''
+raw = raw.replace(end, cold, 1)
+s = pre + raw + post
 
-# Disable the benchmark main so the common adapter can own the executable.
+# Adapter owns main for the MPFR scanner / speed harness.
 q='\nint main(void)\n{'
-if s.count(q)!=1:
+if s.count(q) != 1:
     raise SystemExit('main count')
 s=s.replace(q,'\nint sine53_production_disabled_main(void)\n{',1)
 Path(dst).write_text(s)
