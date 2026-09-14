@@ -36,8 +36,6 @@ elif mode.startswith('hlo_'):
     if s.count(old)!=1: raise SystemExit(f'HLO count={s.count(old)}')
     s=s.replace(old,step_hex(old,st),1)
 elif mode.startswith('lut_'):
-    # lut_<sstep>_<cstep>. Preserve sine/cosine table symmetries:
-    # s[2]==s[510], c[510]==-c[2]. cstep is applied to c[2]; opposite to c[510].
     _,a,b=mode.split('_')
     ss=int(a); cs=int(b)
     s=edit_array(s,'x65_s',{2:ss,510:ss})
@@ -46,4 +44,8 @@ elif mode=='baseline':
     pass
 else:
     raise SystemExit('unknown mode '+mode)
+
+# The CI wrapper renames this dummy entry point before embedding the source.
+# Production code is never modified.
+s += '\nint main(void){return 0;}\n'
 Path(dst).write_text(s)
