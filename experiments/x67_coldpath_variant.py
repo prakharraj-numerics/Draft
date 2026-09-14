@@ -12,12 +12,55 @@ s = Path(src).read_text()
 # previous experiment mistakenly attached its guard to x12/general, so the
 # 8192-point accuracy chunks bypassed the repair entirely.  Patch ONLY rawx67.
 raw_mark = 'OVEC __attribute__((noinline,hot,aligned(64))) static void octant_vector_v8_rawx67('
-raw_end_mark = 'static const double x65_s[512]'
-if s.count(raw_mark) != 1 or s.count(raw_end_mark) != 1:
-    raise SystemExit('rawx67 markers')
-a = s.index(raw_mark)
-b = s.index(raw_end_mark, a)
+if s.count(raw_mark) != 1:
+    raise SystemExit('rawx67 marker count')
+
+# Do not assume any particular declaration follows rawx67.  Find the matching
+# closing brace of the C function itself, while ignoring braces in comments and
+# quoted literals.  This makes extraction insensitive to table/function order.
+def function_extent(text, marker):
+    start = text.index(marker)
+    brace = text.find('{', start)
+    if brace < 0:
+        raise SystemExit('rawx67 opening brace not found')
+    depth = 0
+    state = 'code'
+    i = brace
+    while i < len(text):
+        c = text[i]
+        n = text[i+1] if i+1 < len(text) else ''
+        if state == 'code':
+            if c == '/' and n == '/':
+                state = 'line'; i += 2; continue
+            if c == '/' and n == '*':
+                state = 'block'; i += 2; continue
+            if c == '"':
+                state = 'string'; i += 1; continue
+            if c == "'":
+                state = 'char'; i += 1; continue
+            if c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0:
+                    return start, i + 1
+        elif state == 'line':
+            if c == '\n': state = 'code'
+        elif state == 'block':
+            if c == '*' and n == '/':
+                state = 'code'; i += 2; continue
+        elif state in ('string', 'char'):
+            if c == '\\':
+                i += 2; continue
+            if (state == 'string' and c == '"') or (state == 'char' and c == "'"):
+                state = 'code'
+        i += 1
+    raise SystemExit('rawx67 closing brace not found')
+
+a, b = function_extent(s, raw_mark)
 pre, raw, post = s[:a], s[a:b], s[b:]
+if raw.count(raw_mark) != 1:
+    raise SystemExit('rawx67 extraction sanity')
 
 loop = '''        /* Same degree-5 polynomial, algebraically grouped into independent\n           even/odd d^2 chains: much shorter dependency chain than Horner. */\n        for(int g=0;g<4;g++){'''
 if raw.count(loop) != 1:
@@ -47,6 +90,8 @@ if raw.count(end) != 1:
 
 cold = '''            _mm512_storeu_pd(out+i+8*g,pv[g]);\n        }\n\n        /* True cold path: only suspect lanes are recomputed.  The common\n           result above is exactly the frozen X67 output. */\n        if(__builtin_expect(x67_pack!=0,0)){\n            const __m512d DH=_mm512_set1_pd(0x1.921fb54442d18p-7);\n            const __m512d DL=_mm512_set1_pd(0x1.1a62633145c07p-61);\n            const __m512d N5040=_mm512_set1_pd(-1.0/5040.0);\n            for(int g=0;g<4;g++){\n                __mmask8 x67_fix=(__mmask8)((x67_pack>>(8*g))&0xffu);\n                if(!x67_fix) continue;\n                __mmask8 m510=(__mmask8)(mask_eq_i32(ji[g],510)&x67_fix);\n                __m512d bb=_mm512_mask_sub_pd(d[g],m510,Z,d[g]);\n                __m512d rrh=_mm512_add_pd(DH,bb);\n                __m512d rre=_mm512_sub_pd(bb,_mm512_sub_pd(rrh,DH));\n                __m512d rrl=_mm512_add_pd(rre,DL);\n                __m512d zz=_mm512_mul_pd(rrh,rrh);\n                __m512d pp=_mm512_fmadd_pd(zz,N5040,C120);\n                pp=_mm512_fmadd_pd(zz,pp,M6);\n                __m512d alt=_mm512_fmadd_pd(_mm512_mul_pd(rrh,zz),pp,rrh);\n                alt=_mm512_add_pd(alt,rrl);\n                alt=_mm512_mask_sub_pd(alt,sg[g],Z,alt);\n                _mm512_mask_storeu_pd(out+i+8*g,x67_fix,alt);\n            }\n        }\n    }\n    if(i<n) octant_vector_v8_x56_general(k,x+i,out+i,n-i);'''
 raw = raw.replace(end, cold, 1)
+if raw.count('unsigned x67_pack=0;') != 1 or raw.count('True cold path: only suspect lanes are recomputed.') != 1:
+    raise SystemExit('rawx67 patch sanity')
 s = pre + raw + post
 
 # Adapter owns main for the MPFR scanner / speed harness.
