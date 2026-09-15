@@ -1,0 +1,189 @@
+name: SINE53 X50 zero pi4 accuracy only
+
+on:
+  push:
+    branches: [experiment/x50-zero-pi4-accuracy-20260915]
+    paths:
+      - '.github/workflows/sine53-x50-zero-pi4-accuracy.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: sine53-x50-zero-pi4-accuracy
+  cancel-in-progress: true
+
+jobs:
+  accuracy:
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        slot: [1,2,3,4,5,6,7,8]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Gate AVX-512 only
+        id: gate
+        shell: bash
+        run: |
+          MODEL="$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          echo "CPU=$MODEL SLOT=${{ matrix.slot }}"
+          if grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f \
+             && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512dq \
+             && grep -m1 '^flags' /proc/cpuinfo | grep -qw fma; then
+            echo eligible=1 >> "$GITHUB_OUTPUT"
+          else
+            echo eligible=0 >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install MPFR only
+        if: steps.gate.outputs.eligible == '1'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential libmpfr-dev libgmp-dev python3
+
+      - name: Extract frozen X50 anchor planes
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          s = Path('sine53_x67_wide_production.c').read_text()
+          out = ['#pragma once']
+          for name in ('x65_s','x65_c'):
+              m = re.search(r'static const double\s+'+name+r'\[512\].*?=\{(.*?)\};', s, re.S)
+              if not m:
+                  raise SystemExit(f'{name} table not found')
+              vals = [v.strip() for v in m.group(1).split(',') if v.strip()]
+              if len(vals) != 512:
+                  raise SystemExit(f'{name} count={len(vals)}')
+              out.append(f'alignas(64) static const double {name}[512] = {{')
+              for i in range(0,512,8): out.append('  '+','.join(vals[i:i+8])+',')
+              out.append('};')
+          Path('/tmp/x50_tables.hpp').write_text('\n'.join(out)+'\n')
+          print('extracted x65_s/x65_c: 512 + 512 anchors')
+          PY
+
+      - name: Write X50 accuracy checker
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          cat > /tmp/x50_accuracy.cpp <<'CPP'
+          #include <immintrin.h>
+          #include <mpfr.h>
+          #include <algorithm>
+          #include <cfloat>
+          #include <cmath>
+          #include <cstdint>
+          #include <cstdio>
+          #include <cstring>
+          #include <limits>
+          #include <string>
+          #include <vector>
+          #include "/tmp/x50_tables.hpp"
+
+          static uint64_t bits(double x){ uint64_t u; std::memcpy(&u,&x,8); return u; }
+          static double frombits(uint64_t u){ double x; std::memcpy(&x,&u,8); return x; }
+          static uint64_t ord(double x){ uint64_t u=bits(x); return (u>>63)?~u:(u|UINT64_C(0x8000000000000000)); }
+          static uint64_t ulpd(double a,double b){ if(a==b)return 0; uint64_t x=ord(a),y=ord(b); return x>y?x-y:y-x; }
+
+          __attribute__((target("avx512f,avx512dq,avx2,fma")))
+          static void x50_eval(const double *x,double *out,size_t n){
+              const __m512d VK=_mm512_set1_pd(256.0), VIK=_mm512_set1_pd(1.0/256.0), Z=_mm512_setzero_pd();
+              const __m512d MH=_mm512_set1_pd(-0.5), M6=_mm512_set1_pd(-1.0/6.0);
+              const __m512d C24=_mm512_set1_pd(1.0/24.0), C120=_mm512_set1_pd(1.0/120.0);
+              const __m512i ABSM=_mm512_set1_epi64((long long)UINT64_C(0x7fffffffffffffff));
+              for(size_t i=0;i<n;i+=8){
+                  unsigned rem=(unsigned)(n-i); __mmask8 active=(__mmask8)(rem>=8?0xffu:((1u<<rem)-1u));
+                  __m512d vx=_mm512_maskz_loadu_pd(active,x+i); __m512i vxi=_mm512_castpd_si512(vx);
+                  __mmask8 sign=(__mmask8)(_mm512_movepi64_mask(vxi)&active);
+                  __m512d ax=_mm512_castsi512_pd(_mm512_and_epi64(vxi,ABSM));
+                  __m512d sy=_mm512_mul_pd(ax,VK);
+                  __m256i ji=_mm512_cvt_roundpd_epi32(sy,_MM_FROUND_TO_NEAREST_INT|_MM_FROUND_NO_EXC);
+                  __m512d jd=_mm512_cvtepi32_pd(ji);
+                  __m512d d=_mm512_fnmadd_pd(jd,VIK,ax);
+                  __m512d c0=_mm512_i32gather_pd(ji,x65_s,8);
+                  __m512d c1=_mm512_i32gather_pd(ji,x65_c,8);
+                  __m512d c2=_mm512_mul_pd(c0,MH), c3=_mm512_mul_pd(c1,M6);
+                  __m512d c4=_mm512_mul_pd(c0,C24), c5=_mm512_mul_pd(c1,C120);
+                  __m512d p=_mm512_fmadd_pd(c5,d,c4);
+                  p=_mm512_fmadd_pd(p,d,c3);
+                  p=_mm512_fmadd_pd(p,d,c2);
+                  p=_mm512_fmadd_pd(p,d,c1);
+                  p=_mm512_fmadd_pd(p,d,c0);
+                  p=_mm512_mask_sub_pd(p,sign,Z,p);
+                  _mm512_mask_storeu_pd(out+i,active,p);
+              }
+          }
+
+          struct Stat{ uint64_t total=0,exact=0,one=0,ge2=0,maxu=0; double worstx=0,worsty=0,worstr=0; };
+
+          static Stat check(const char *tag,const std::vector<double>& x){
+              std::vector<double> y(x.size()); x50_eval(x.data(),y.data(),x.size());
+              mpfr_t a,s; mpfr_init2(a,512); mpfr_init2(s,512); Stat st;
+              for(size_t i=0;i<x.size();++i){
+                  mpfr_set_d(a,x[i],MPFR_RNDN); mpfr_sin(s,a,MPFR_RNDN); double r=mpfr_get_d(s,MPFR_RNDN);
+                  uint64_t u=ulpd(y[i],r); st.total++; st.exact+=u==0; st.one+=u==1; st.ge2+=u>=2;
+                  if(u>st.maxu){ st.maxu=u; st.worstx=x[i]; st.worsty=y[i]; st.worstr=r; }
+              }
+              mpfr_clear(s); mpfr_clear(a);
+              std::printf("X50_ACC tag=%s total=%llu exact=%llu one=%llu ge2=%llu maxulp=%llu worst_x=%.17g got=%.17g ref=%.17g\n",
+                  tag,(unsigned long long)st.total,(unsigned long long)st.exact,(unsigned long long)st.one,
+                  (unsigned long long)st.ge2,(unsigned long long)st.maxu,st.worstx,st.worsty,st.worstr);
+              return st;
+          }
+
+          static void append_neighbors(std::vector<double>&v,double c,uint64_t radius){
+              uint64_t b=bits(c); for(uint64_t k=radius;k>0;--k) v.push_back(frombits(b-k));
+              v.push_back(c); for(uint64_t k=1;k<=radius;++k) v.push_back(frombits(b+k));
+          }
+
+          int main(){
+              if(!__builtin_cpu_supports("avx512f")||!__builtin_cpu_supports("avx512dq")||!__builtin_cpu_supports("fma")){
+                  std::puts("X50_ACC SKIP no AVX512F/DQ/FMA"); return 77;
+              }
+              uint64_t overall=0;
+
+              std::vector<double> tiny; tiny.reserve(140000);
+              tiny.push_back(0.0); tiny.push_back(std::nextafter(0.0,1.0)); tiny.push_back(DBL_MIN);
+              for(uint64_t u=1;u<=131072;++u) tiny.push_back(frombits(u));
+              for(int e=-1022;e<=-1;++e){ double p=std::ldexp(1.0,e); tiny.push_back(std::nextafter(p,0.0)); tiny.push_back(p); tiny.push_back(std::nextafter(p,INFINITY)); }
+              auto a=check("very_close_zero",tiny); overall=std::max(overall,a.maxu);
+
+              std::vector<double> near0; const size_t N0=262144; near0.reserve(N0);
+              for(size_t i=0;i<N0;++i) near0.push_back(0.025*((double)i+0.5)/(double)N0);
+              auto b=check("zero_to_0p025_dense",near0); overall=std::max(overall,b.maxu);
+
+              std::vector<double> j2; j2.reserve(524289); append_neighbors(j2,2.0/256.0,262144);
+              auto c=check("j2_anchor_ulp_neighborhood",j2); overall=std::max(overall,c.maxu);
+
+              mpfr_t pi; mpfr_init2(pi,512); mpfr_const_pi(pi,MPFR_RNDN); mpfr_div_ui(pi,pi,4,MPFR_RNDN);
+              double p4=mpfr_get_d(pi,MPFR_RNDN); mpfr_clear(pi);
+              std::vector<double> q; q.reserve(1048577); append_neighbors(q,p4,524288);
+              auto d=check("pi_over_4_ulp_neighborhood",q); overall=std::max(overall,d.maxu);
+
+              std::vector<double> neg;
+              for(size_t i=0;i<8192;++i){ double m=(i<4096)?near0[i]:q[i-4096]; neg.push_back(-m); }
+              auto e=check("negative_mirror_sample",neg); overall=std::max(overall,e.maxu);
+
+              std::printf("X50_OVERALL maxulp=%llu status=%s reference=MPFR512_RNDN\n",
+                  (unsigned long long)overall,overall<=1?"PASS":"FAIL");
+              return overall<=1?0:1;
+          }
+          CPP
+
+      - name: Build and run accuracy only
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          g++ -O3 -march=native -fno-math-errno /tmp/x50_accuracy.cpp -lmpfr -lgmp -lm -o /tmp/x50_accuracy
+          /tmp/x50_accuracy | tee /tmp/x50-accuracy-results.txt
+
+      - uses: actions/upload-artifact@v4
+        if: steps.gate.outputs.eligible == '1' && always()
+        with:
+          name: x50-zero-pi4-accuracy-${{ matrix.slot }}
+          path: /tmp/x50-accuracy-results.txt
+          if-no-files-found: ignore
