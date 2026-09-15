@@ -167,7 +167,7 @@ jobs:
           C
           MKLROOT=/opt/intel/oneapi/mkl/latest
           CC=/opt/intel/oneapi/compiler/latest/bin/icx
-          INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
+          INC="-D_GNU_SOURCE -DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
           LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
           export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:$MKLROOT/lib:/opt/intel/oneapi/compiler/latest/lib:${LD_LIBRARY_PATH:-}"
           for p in x50 x67; do
@@ -184,12 +184,12 @@ jobs:
           set -euo pipefail
           MKLROOT=/opt/intel/oneapi/mkl/latest
           CC=/opt/intel/oneapi/compiler/latest/bin/icx
-          INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
+          INC="-D_GNU_SOURCE -DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
           OPT='-O3 -xHost -qopt-zmm-usage=high -fp-model=precise -fno-math-errno'
           HARD="$OPT -flto -fvisibility=hidden -fno-semantic-interposition -ffunction-sections -fdata-sections -fno-ident -fno-unwind-tables -fno-asynchronous-unwind-tables -ffile-prefix-map=$GITHUB_WORKSPACE=. -fdebug-prefix-map=$GITHUB_WORKSPACE=."
           "$CC" $HARD $INC -DC53_GENERATED_SOURCE=\"/tmp/c53/x50.c\" -DC53_FROZEN_TABLES_HEADER=\"/tmp/c53/x50-tables.h\" -DENGINE_PREFIX=u -c release/c53_frozen_engine.c -o /tmp/c53/u.o
           "$CC" $HARD $INC -DC53_GENERATED_SOURCE=\"/tmp/c53/x67.c\" -DC53_FROZEN_TABLES_HEADER=\"/tmp/c53/x67-tables.h\" -DENGINE_PREFIX=w -c release/c53_frozen_engine.c -o /tmp/c53/w.o
-          "$CC" $HARD -c release/c53_api.c -o /tmp/c53/api.o
+          "$CC" $HARD -D_GNU_SOURCE -c release/c53_api.c -o /tmp/c53/api.o
           "$CC" -shared -flto -o /tmp/c53/libc53.so /tmp/c53/u.o /tmp/c53/w.o /tmp/c53/api.o \
             -Wl,--gc-sections -Wl,--version-script=release/c53_exports.map -Wl,-Bsymbolic-functions \
             -Wl,--build-id=none -Wl,-z,defs -Wl,-O2 -lm
@@ -288,7 +288,7 @@ jobs:
           C
           MKLROOT=/opt/intel/oneapi/mkl/latest
           CC=/opt/intel/oneapi/compiler/latest/bin/icx
-          INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
+          INC="-D_GNU_SOURCE -DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
           OPT='-O3 -xHost -qopt-zmm-usage=high -fp-model=precise -fno-math-errno'
           LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
           export LD_LIBRARY_PATH="/tmp/c53:$FLINT_PREFIX/lib:$MKLROOT/lib:/opt/intel/oneapi/compiler/latest/lib:${LD_LIBRARY_PATH:-}"
