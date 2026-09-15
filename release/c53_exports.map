@@ -1,0 +1,8 @@
+{
+  global:
+    c53_init;
+    c53_eval;
+    c53_close;
+  local:
+    *;
+};
