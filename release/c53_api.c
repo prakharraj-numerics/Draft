@@ -31,6 +31,7 @@ __attribute__((visibility("default"))) int c53_eval(double *out, const double *i
     if (!c_ready) return -2;
     if ((n && (!out || !in)) || profile > 1U) return -1;
     if (!n) return 0;
+
     if (profile == 0U) u_eval(out, in, n);
     else w_eval(out, in, n);
     return 0;
