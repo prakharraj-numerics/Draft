@@ -1,4 +1,5 @@
 #include <stddef.h>
+#include <string.h>
 
 int u_init(void);
 void u_eval(double *, const double *, size_t);
@@ -6,6 +7,13 @@ void u_close(void);
 int w_init(void);
 void w_eval(double *, const double *, size_t);
 void w_close(void);
+
+__attribute__((visibility("hidden"), noinline))
+void *_intel_fast_memset(void *dst, int c, size_t n)
+{
+    static void *(*volatile fn)(void *, int, size_t) = memset;
+    return fn(dst, c, n);
+}
 
 static int c_ready;
 
