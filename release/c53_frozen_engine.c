@@ -14,7 +14,19 @@
 #define C53_CAT(a,b) C53_CAT2(a,b)
 #define C53_FN(n) C53_CAT(ENGINE_PREFIX,n)
 
+/* The benchmark translation units carry dormant non-static main replacements.
+   Give each embedded engine private names so the two production objects can be
+   linked together without exposing or retaining those harness entry points. */
+#define c53_support_disabled_main C53_FN(_s0)
+#define c53_wide_support_disabled_main C53_FN(_s1)
+#define c53_unit_disabled_main C53_FN(_s2)
+#define c53_wide_disabled_main C53_FN(_s3)
 #include C53_GENERATED_SOURCE
+#undef c53_wide_disabled_main
+#undef c53_unit_disabled_main
+#undef c53_wide_support_disabled_main
+#undef c53_support_disabled_main
+
 #include C53_FROZEN_TABLES_HEADER
 
 static s53w_kernel C53_FN(_kobj);
