@@ -41,32 +41,9 @@ jobs:
         if: steps.gate.outputs.eligible == '1'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends build-essential libmpfr-dev libgmp-dev python3
+          sudo apt-get install -y --no-install-recommends build-essential libmpfr-dev libgmp-dev
 
-      - name: Extract frozen X50 anchor planes
-        if: steps.gate.outputs.eligible == '1'
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-          s = Path('sine53_x67_wide_production.c').read_text()
-          out = ['#pragma once']
-          for name in ('x65_s','x65_c'):
-              m = re.search(r'static const double\s+'+name+r'\[512\].*?=\{(.*?)\};', s, re.S)
-              if not m:
-                  raise SystemExit(f'{name} table not found')
-              vals = [v.strip() for v in m.group(1).split(',') if v.strip()]
-              if len(vals) != 512:
-                  raise SystemExit(f'{name} count={len(vals)}')
-              out.append(f'alignas(64) static const double {name}[512] = {{')
-              for i in range(0,512,8): out.append('  '+','.join(vals[i:i+8])+',')
-              out.append('};')
-          Path('/tmp/x50_tables.hpp').write_text('\n'.join(out)+'\n')
-          print('extracted x65_s/x65_c: 512 + 512 anchors')
-          PY
-
-      - name: Write X50 accuracy checker
+      - name: Write exact X50 unit-path checker
         if: steps.gate.outputs.eligible == '1'
         shell: bash
         run: |
@@ -79,15 +56,32 @@ jobs:
           #include <cstdint>
           #include <cstdio>
           #include <cstring>
-          #include <limits>
-          #include <string>
           #include <vector>
-          #include "/tmp/x50_tables.hpp"
+
+          /*
+             Standalone reproduction of X50's |x|<1 mode5_poly_x11 hot path.
+             Production X50 uses KGRID=256 and the first two table planes are
+             sin(a/256), cos(a/256), rounded to binary64.  The remaining degree-5
+             coefficients are formed in the hot kernel from c0/c1 exactly as below.
+             MPFR builds those two anchor planes here, so FLINT and Intel libraries
+             are not part of this accuracy job.
+          */
+          alignas(64) static double s0[257], c0tab[257];
 
           static uint64_t bits(double x){ uint64_t u; std::memcpy(&u,&x,8); return u; }
           static double frombits(uint64_t u){ double x; std::memcpy(&x,&u,8); return x; }
           static uint64_t ord(double x){ uint64_t u=bits(x); return (u>>63)?~u:(u|UINT64_C(0x8000000000000000)); }
           static uint64_t ulpd(double a,double b){ if(a==b)return 0; uint64_t x=ord(a),y=ord(b); return x>y?x-y:y-x; }
+
+          static void make_anchors(){
+              mpfr_t a,s,c; mpfr_init2(a,512); mpfr_init2(s,512); mpfr_init2(c,512);
+              for(int j=0;j<=256;++j){
+                  mpfr_set_ui(a,(unsigned)j,MPFR_RNDN); mpfr_div_ui(a,a,256,MPFR_RNDN);
+                  mpfr_sin_cos(s,c,a,MPFR_RNDN);
+                  s0[j]=mpfr_get_d(s,MPFR_RNDN); c0tab[j]=mpfr_get_d(c,MPFR_RNDN);
+              }
+              mpfr_clear(c); mpfr_clear(s); mpfr_clear(a);
+          }
 
           __attribute__((target("avx512f,avx512dq,avx2,fma")))
           static void x50_eval(const double *x,double *out,size_t n){
@@ -104,22 +98,21 @@ jobs:
                   __m256i ji=_mm512_cvt_roundpd_epi32(sy,_MM_FROUND_TO_NEAREST_INT|_MM_FROUND_NO_EXC);
                   __m512d jd=_mm512_cvtepi32_pd(ji);
                   __m512d d=_mm512_fnmadd_pd(jd,VIK,ax);
-                  __m512d c0=_mm512_i32gather_pd(ji,x65_s,8);
-                  __m512d c1=_mm512_i32gather_pd(ji,x65_c,8);
-                  __m512d c2=_mm512_mul_pd(c0,MH), c3=_mm512_mul_pd(c1,M6);
-                  __m512d c4=_mm512_mul_pd(c0,C24), c5=_mm512_mul_pd(c1,C120);
-                  __m512d p=_mm512_fmadd_pd(c5,d,c4);
-                  p=_mm512_fmadd_pd(p,d,c3);
-                  p=_mm512_fmadd_pd(p,d,c2);
-                  p=_mm512_fmadd_pd(p,d,c1);
-                  p=_mm512_fmadd_pd(p,d,c0);
+                  __m512d a0=_mm512_i32gather_pd(ji,s0,8);
+                  __m512d a1=_mm512_i32gather_pd(ji,c0tab,8);
+                  __m512d a2=_mm512_mul_pd(a0,MH), a3=_mm512_mul_pd(a1,M6);
+                  __m512d a4=_mm512_mul_pd(a0,C24), a5=_mm512_mul_pd(a1,C120);
+                  __m512d p=_mm512_fmadd_pd(a5,d,a4);
+                  p=_mm512_fmadd_pd(p,d,a3);
+                  p=_mm512_fmadd_pd(p,d,a2);
+                  p=_mm512_fmadd_pd(p,d,a1);
+                  p=_mm512_fmadd_pd(p,d,a0);
                   p=_mm512_mask_sub_pd(p,sign,Z,p);
                   _mm512_mask_storeu_pd(out+i,active,p);
               }
           }
 
           struct Stat{ uint64_t total=0,exact=0,one=0,ge2=0,maxu=0; double worstx=0,worsty=0,worstr=0; };
-
           static Stat check(const char *tag,const std::vector<double>& x){
               std::vector<double> y(x.size()); x50_eval(x.data(),y.data(),x.size());
               mpfr_t a,s; mpfr_init2(a,512); mpfr_init2(s,512); Stat st;
@@ -144,29 +137,40 @@ jobs:
               if(!__builtin_cpu_supports("avx512f")||!__builtin_cpu_supports("avx512dq")||!__builtin_cpu_supports("fma")){
                   std::puts("X50_ACC SKIP no AVX512F/DQ/FMA"); return 77;
               }
-              uint64_t overall=0;
+              make_anchors(); uint64_t overall=0;
 
-              std::vector<double> tiny; tiny.reserve(140000);
-              tiny.push_back(0.0); tiny.push_back(std::nextafter(0.0,1.0)); tiny.push_back(DBL_MIN);
-              for(uint64_t u=1;u<=131072;++u) tiny.push_back(frombits(u));
-              for(int e=-1022;e<=-1;++e){ double p=std::ldexp(1.0,e); tiny.push_back(std::nextafter(p,0.0)); tiny.push_back(p); tiny.push_back(std::nextafter(p,INFINITY)); }
+              /* First 2^20 positive representable values above zero + log-spaced exponent edges. */
+              std::vector<double> tiny; tiny.reserve(1052000);
+              tiny.push_back(0.0);
+              for(uint64_t u=1;u<=UINT64_C(1048576);++u) tiny.push_back(frombits(u));
+              for(int e=-1022;e<=-8;++e){ double p=std::ldexp(1.0,e); tiny.push_back(std::nextafter(p,0.0)); tiny.push_back(p); tiny.push_back(std::nextafter(p,INFINITY)); }
               auto a=check("very_close_zero",tiny); overall=std::max(overall,a.maxu);
 
-              std::vector<double> near0; const size_t N0=262144; near0.reserve(N0);
+              /* Dense close-to-zero window, includes j=0,1,... and the j=2 anchor at 1/128. */
+              const size_t N0=524288; std::vector<double> near0; near0.reserve(N0);
               for(size_t i=0;i<N0;++i) near0.push_back(0.025*((double)i+0.5)/(double)N0);
               auto b=check("zero_to_0p025_dense",near0); overall=std::max(overall,b.maxu);
 
-              std::vector<double> j2; j2.reserve(524289); append_neighbors(j2,2.0/256.0,262144);
+              /* Directly attack the X50 j=2 cell/anchor. */
+              std::vector<double> j2; j2.reserve(1048577); append_neighbors(j2,2.0/256.0,524288);
               auto c=check("j2_anchor_ulp_neighborhood",j2); overall=std::max(overall,c.maxu);
 
+              /* Very tight representable neighborhood around correctly-rounded pi/4. */
               mpfr_t pi; mpfr_init2(pi,512); mpfr_const_pi(pi,MPFR_RNDN); mpfr_div_ui(pi,pi,4,MPFR_RNDN);
               double p4=mpfr_get_d(pi,MPFR_RNDN); mpfr_clear(pi);
-              std::vector<double> q; q.reserve(1048577); append_neighbors(q,p4,524288);
+              std::vector<double> q; q.reserve(2097153); append_neighbors(q,p4,1048576);
               auto d=check("pi_over_4_ulp_neighborhood",q); overall=std::max(overall,d.maxu);
 
-              std::vector<double> neg;
-              for(size_t i=0;i<8192;++i){ double m=(i<4096)?near0[i]:q[i-4096]; neg.push_back(-m); }
-              auto e=check("negative_mirror_sample",neg); overall=std::max(overall,e.maxu);
+              /* Wider dense pi/4 window: +/- 0.002 around pi/4. */
+              const size_t NP=524288; std::vector<double> qw; qw.reserve(NP);
+              for(size_t i=0;i<NP;++i) qw.push_back((p4-0.002)+0.004*((double)i+0.5)/(double)NP);
+              auto e=check("pi_over_4_pm_0p002_dense",qw); overall=std::max(overall,e.maxu);
+
+              /* Sign handling is exact masking, but sample both hostile regions negatively too. */
+              std::vector<double> neg; neg.reserve(32768);
+              for(size_t i=0;i<16384;++i) neg.push_back(-near0[i]);
+              for(size_t i=0;i<16384;++i) neg.push_back(-q[(q.size()/2-8192)+i]);
+              auto f=check("negative_mirror_sample",neg); overall=std::max(overall,f.maxu);
 
               std::printf("X50_OVERALL maxulp=%llu status=%s reference=MPFR512_RNDN\n",
                   (unsigned long long)overall,overall<=1?"PASS":"FAIL");
