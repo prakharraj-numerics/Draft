@@ -1,0 +1,216 @@
+name: SINE53 exact X50 hostile accuracy
+
+on:
+  push:
+    branches: [experiment/x50-zero-pi4-accuracy-20260915]
+    paths:
+      - '.github/workflows/sine53-x50-zero-pi4-exact.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: sine53-x50-zero-pi4-exact
+  cancel-in-progress: true
+
+jobs:
+  accuracy:
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        slot: [1,2,3,4]
+    runs-on: ubuntu-24.04
+    env:
+      FLINT_PREFIX: /home/runner/flint36
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Gate AVX-512 only (no Xeon requirement)
+        id: gate
+        shell: bash
+        run: |
+          MODEL="$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          echo "CPU=$MODEL SLOT=${{ matrix.slot }}"
+          if grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f \
+             && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512dq \
+             && grep -m1 '^flags' /proc/cpuinfo | grep -qw fma; then
+            echo eligible=1 >> "$GITHUB_OUTPUT"
+          else
+            echo eligible=0 >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install prerequisites
+        if: steps.gate.outputs.eligible == '1'
+        run: |
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \( -iname '*microsoft*' -o -iname '*azure*' \) -delete || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential libgmp-dev libmpfr-dev python3 curl xz-utils gpg-agent wget ca-certificates
+
+      - name: Restore Intel oneAPI
+        if: steps.gate.outputs.eligible == '1'
+        id: oneapi
+        uses: actions/cache@v4
+        with:
+          path: /opt/intel/oneapi
+          key: intel-oneapi-prof3-intel-2026.1.0-236-2026.1.1-325-v1
+
+      - name: Install Intel oneAPI on cache miss
+        if: steps.gate.outputs.eligible == '1' && steps.oneapi.outputs.cache-hit != 'true'
+        run: |
+          wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg >/dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main' | sudo tee /etc/apt/sources.list.d/oneAPI.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends intel-oneapi-mkl-devel intel-oneapi-compiler-dpcpp-cpp
+
+      - name: Restore FLINT 3.6.0
+        if: steps.gate.outputs.eligible == '1'
+        id: flint
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/flint36
+          key: flint-3.6.0-ubuntu24-x86_64-native-cd49f6116fb977da331dbb6627f4998397730a62253bd7a70a201ad5a00576d7-v2
+
+      - name: Install FLINT on cache miss
+        if: steps.gate.outputs.eligible == '1' && steps.flint.outputs.cache-hit != 'true'
+        run: |
+          curl -L --fail --retry 3 -o /tmp/flint.tar.xz https://github.com/flintlib/flint/releases/download/v3.6.0/flint-3.6.0.tar.xz
+          echo '134d39731a6dd926254625d646d85bf5990c68a3f2326cd54d2a6983e3e11dd8  /tmp/flint.tar.xz' | sha256sum -c -
+          tar -xf /tmp/flint.tar.xz -C /tmp
+          cd /tmp/flint-3.6.0
+          CFLAGS='-O3 -march=native -DNDEBUG' ./configure --prefix="$FLINT_PREFIX"
+          make -j2 >/dev/null
+          make install >/dev/null
+
+      - name: Reconstruct exact frozen X50 production translation unit
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/prakharraj-numerics/Draft/backup-pre-cleanup-20260830/bench_sine_53_wide_fast2.c -o bench_sine_53_wide_fast2.c
+          curl -fsSL https://raw.githubusercontent.com/prakharraj-numerics/Draft/backup-pre-cleanup-20260830/bench_sine_53_wide_intel.c -o bench_sine_53_wide_intel.c
+          curl -fsSL https://raw.githubusercontent.com/prakharraj-numerics/Draft/backup-pre-cleanup-20260830/sine_53_coeff_source.c -o sine_53_coeff_source.c
+          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
+          cp sine53_x50_unit_production.c generated_x50.c
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('generated_x50.c'); s=p.read_text(); needle='int main(void){'
+          if s.count(needle)!=1: raise SystemExit(f'main count={s.count(needle)}')
+          p.write_text(s.replace(needle,'int sine53_embedded_main(void){',1))
+          PY
+          sha256sum sine53_x50_unit_production.c generated_x50.c
+
+      - name: Write exact X50 adapter and hostile MPFR checker
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          cat > /tmp/x50_adapter.c <<'C'
+          #define _GNU_SOURCE
+          #include <stddef.h>
+          #include "generated_x50.c"
+          static s53w_kernel *x50k = NULL;
+          int x50_init(void){ x50k=kernel_create(2); return x50k!=NULL; }
+          void x50_eval_exact(double *out,const double *in,size_t n){ octant_eval_v8(x50k,in,out,n); }
+          void x50_close(void){ if(x50k){kernel_destroy(x50k);x50k=NULL;} flint_cleanup_master(); }
+          C
+
+          cat > /tmp/x50_check.cpp <<'CPP'
+          #include <mpfr.h>
+          #include <algorithm>
+          #include <cfloat>
+          #include <cmath>
+          #include <cstdint>
+          #include <cstdio>
+          #include <cstring>
+          #include <vector>
+          extern "C" int x50_init(void);
+          extern "C" void x50_eval_exact(double*,const double*,size_t);
+          extern "C" void x50_close(void);
+
+          static uint64_t bits(double x){uint64_t u;std::memcpy(&u,&x,8);return u;}
+          static double frombits(uint64_t u){double x;std::memcpy(&x,&u,8);return x;}
+          static uint64_t ord(double x){uint64_t u=bits(x);return(u>>63)?~u:(u|UINT64_C(0x8000000000000000));}
+          static uint64_t ulpd(double a,double b){if(a==b)return 0;auto x=ord(a),y=ord(b);return x>y?x-y:y-x;}
+          struct Stat{uint64_t total=0,exact=0,one=0,ge2=0,maxu=0;double wx=0,wy=0,wr=0;};
+
+          static Stat check(const char*tag,const std::vector<double>&x){
+            std::vector<double> y(x.size()); x50_eval_exact(y.data(),x.data(),x.size());
+            mpfr_t a,s;mpfr_init2(a,512);mpfr_init2(s,512);Stat st;
+            for(size_t i=0;i<x.size();++i){
+              mpfr_set_d(a,x[i],MPFR_RNDN);mpfr_sin(s,a,MPFR_RNDN);double r=mpfr_get_d(s,MPFR_RNDN);
+              uint64_t u=ulpd(y[i],r);st.total++;st.exact+=u==0;st.one+=u==1;st.ge2+=u>=2;
+              if(u>st.maxu){st.maxu=u;st.wx=x[i];st.wy=y[i];st.wr=r;}
+            }
+            mpfr_clear(s);mpfr_clear(a);
+            std::printf("X50_EXACT tag=%s total=%llu exact=%llu one=%llu ge2=%llu maxulp=%llu worst_x=%.17g got=%.17g ref=%.17g\n",
+              tag,(unsigned long long)st.total,(unsigned long long)st.exact,(unsigned long long)st.one,
+              (unsigned long long)st.ge2,(unsigned long long)st.maxu,st.wx,st.wy,st.wr);
+            return st;
+          }
+          static void around(std::vector<double>&v,double c,uint64_t rad){uint64_t b=bits(c);v.reserve((size_t)(2*rad+1));for(uint64_t k=rad;k>0;--k)v.push_back(frombits(b-k));v.push_back(c);for(uint64_t k=1;k<=rad;++k)v.push_back(frombits(b+k));}
+
+          int main(){
+            if(!x50_init()){std::puts("X50_EXACT init failed");return 2;} uint64_t mx=0;
+
+            std::vector<double> tiny; tiny.reserve(140000);
+            tiny.push_back(0.0); tiny.push_back(std::nextafter(0.0,1.0)); tiny.push_back(DBL_MIN);
+            for(uint64_t u=1;u<=131072;++u) tiny.push_back(frombits(u));
+            for(int e=-1074;e<=-1;++e){double p=std::ldexp(1.0,e);if(p>0){tiny.push_back(std::nextafter(p,0.0));tiny.push_back(p);tiny.push_back(std::nextafter(p,INFINITY));}}
+            auto a=check("very_close_zero",tiny);mx=std::max(mx,a.maxu);
+
+            const size_t N0=262144;std::vector<double> z;z.reserve(N0);
+            for(size_t i=0;i<N0;i++)z.push_back(0.025*((double)i+0.5)/(double)N0);
+            auto b=check("zero_to_0p025_dense",z);mx=std::max(mx,b.maxu);
+
+            const double j2lo=1.5/256.0,j2hi=2.5/256.0;const size_t NJ=524288;std::vector<double> j2;j2.reserve(NJ+6);
+            j2.push_back(std::nextafter(j2lo,0.0));j2.push_back(j2lo);j2.push_back(std::nextafter(j2lo,INFINITY));
+            for(size_t i=0;i<NJ;i++)j2.push_back(j2lo+(j2hi-j2lo)*((double)i+0.5)/(double)NJ);
+            j2.push_back(std::nextafter(j2hi,0.0));j2.push_back(j2hi);j2.push_back(std::nextafter(j2hi,INFINITY));
+            auto c=check("j2_full_rounding_cell",j2);mx=std::max(mx,c.maxu);
+
+            mpfr_t p;mpfr_init2(p,512);mpfr_const_pi(p,MPFR_RNDN);mpfr_div_ui(p,p,4,MPFR_RNDN);double p4=mpfr_get_d(p,MPFR_RNDN);mpfr_clear(p);
+            std::vector<double> p4u;around(p4u,p4,524288);auto d=check("pi_over_4_plusminus_524288_ulps",p4u);mx=std::max(mx,d.maxu);
+
+            const size_t NP=524288;std::vector<double> p4d;p4d.reserve(NP);
+            for(size_t i=0;i<NP;i++)p4d.push_back((p4-0.025)+0.05*((double)i+0.5)/(double)NP);
+            auto e=check("pi_over_4_plusminus_0p025_dense",p4d);mx=std::max(mx,e.maxu);
+
+            const size_t NF=262144;std::vector<double> full;full.reserve(NF);
+            for(size_t i=0;i<NF;i++)full.push_back(((double)i+0.5)/(double)NF);
+            auto f=check("full_0_to_1_dense",full);mx=std::max(mx,f.maxu);
+
+            std::vector<double> neg;neg.reserve(131072);
+            for(size_t i=0;i<65536;i++){neg.push_back(-z[i]);neg.push_back(-p4d[i]);}
+            auto g=check("negative_mirror_sample",neg);mx=std::max(mx,g.maxu);
+
+            x50_close();std::printf("X50_EXACT_OVERALL maxulp=%llu ge2_total=%llu status=%s reference=MPFR512_RNDN\n",
+              (unsigned long long)mx,(unsigned long long)(a.ge2+b.ge2+c.ge2+d.ge2+e.ge2+f.ge2+g.ge2),mx<=1?"PASS":"FAIL");
+            return mx<=1?0:1;
+          }
+          CPP
+
+      - name: Build and run exact production X50 accuracy only
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          MKLROOT=/opt/intel/oneapi/mkl/latest
+          CC=/opt/intel/oneapi/compiler/latest/bin/icx
+          CXX=/opt/intel/oneapi/compiler/latest/bin/icpx
+          INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."
+          LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"
+          COMMON='-O3 -march=native -fp-model=precise -fno-math-errno'
+          "$CC" $COMMON $INC -c /tmp/x50_adapter.c -o /tmp/x50_adapter.o
+          "$CXX" -std=c++17 $COMMON $INC /tmp/x50_check.cpp /tmp/x50_adapter.o -o /tmp/x50_check $LIBS
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:$MKLROOT/lib:${LD_LIBRARY_PATH:-}"
+          { echo "CPU=$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"; echo "HEAD=$(git rev-parse HEAD)"; /tmp/x50_check; } | tee /tmp/x50-exact-results.txt
+
+      - uses: actions/upload-artifact@v4
+        if: steps.gate.outputs.eligible == '1' && always()
+        with:
+          name: x50-exact-accuracy-${{ matrix.slot }}
+          path: /tmp/x50-exact-results.txt
+          if-no-files-found: ignore
