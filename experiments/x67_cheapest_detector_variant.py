@@ -10,9 +10,13 @@ s = Path(src).read_text()
 
 CELL = '0x1.921d1fcdec784p-7'
 m = re.search(r'static const double x65_s\[512\].*?=\{(.*?)\};', s, re.S)
-if not m or m.group(1).count(CELL) != 2:
-    got = -1 if not m else m.group(1).count(CELL)
-    raise SystemExit(f'expected exactly two target-cell anchors in x65_s, got {got}')
+if not m:
+    raise SystemExit('x65_s table not found')
+vals = [v.strip() for v in m.group(1).split(',')]
+pos = sum(v == CELL for v in vals)
+neg = sum(v == '-' + CELL for v in vals)
+if pos != 2 or neg != 2:
+    raise SystemExit(f'expected two +CELL and two -CELL anchors in x65_s, got +{pos} -{neg}')
 
 old = '''            __m512d z=_mm512_mul_pd(d[g],d[g]);
             __m512d ec=_mm512_fmadd_pd(z,C24,MH);      /* -1/2 + z/24 */
