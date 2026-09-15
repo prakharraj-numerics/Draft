@@ -1,0 +1,140 @@
+name: SINE53 exact X50 hostile accuracy v2
+
+on:
+  push:
+    branches: [experiment/x50-zero-pi4-accuracy-20260915]
+    paths:
+      - '.github/workflows/sine53-x50-zero-pi4-exact2.yml'
+  workflow_dispatch:
+
+jobs:
+  accuracy:
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        slot: [1,2,3,4]
+    runs-on: ubuntu-24.04
+    env:
+      FLINT_PREFIX: /home/runner/flint36
+    steps:
+      - uses: actions/checkout@v4
+      - name: Gate AVX-512 only
+        id: gate
+        shell: bash
+        run: |
+          MODEL="$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"
+          echo "CPU=$MODEL SLOT=${{ matrix.slot }}"
+          if grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f && grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512dq && grep -m1 '^flags' /proc/cpuinfo | grep -qw fma; then echo eligible=1 >> "$GITHUB_OUTPUT"; else echo eligible=0 >> "$GITHUB_OUTPUT"; fi
+      - name: Install prerequisites
+        if: steps.gate.outputs.eligible == '1'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential libgmp-dev libmpfr-dev python3 curl xz-utils gpg-agent wget ca-certificates
+      - name: Restore Intel oneAPI
+        if: steps.gate.outputs.eligible == '1'
+        id: oneapi
+        uses: actions/cache@v4
+        with:
+          path: /opt/intel/oneapi
+          key: intel-oneapi-prof3-intel-2026.1.0-236-2026.1.1-325-v1
+      - name: Install Intel oneAPI on cache miss
+        if: steps.gate.outputs.eligible == '1' && steps.oneapi.outputs.cache-hit != 'true'
+        run: |
+          wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg >/dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main' | sudo tee /etc/apt/sources.list.d/oneAPI.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends intel-oneapi-mkl-devel intel-oneapi-compiler-dpcpp-cpp
+      - name: Restore FLINT 3.6.0
+        if: steps.gate.outputs.eligible == '1'
+        id: flint
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/flint36
+          key: flint-3.6.0-ubuntu24-x86_64-native-cd49f6116fb977da331dbb6627f4998397730a62253bd7a70a201ad5a00576d7-v2
+      - name: Install FLINT on cache miss
+        if: steps.gate.outputs.eligible == '1' && steps.flint.outputs.cache-hit != 'true'
+        run: |
+          curl -L --fail --retry 3 -o /tmp/flint.tar.xz https://github.com/flintlib/flint/releases/download/v3.6.0/flint-3.6.0.tar.xz
+          tar -xf /tmp/flint.tar.xz -C /tmp
+          cd /tmp/flint-3.6.0
+          CFLAGS='-O3 -march=native -DNDEBUG' ./configure --prefix="$FLINT_PREFIX"
+          make -j2 >/dev/null && make install >/dev/null
+      - name: Prepare exact frozen X50 source
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/prakharraj-numerics/Draft/backup-pre-cleanup-20260830/bench_sine_53_wide_fast2.c -o bench_sine_53_wide_fast2.c
+          curl -fsSL https://raw.githubusercontent.com/prakharraj-numerics/Draft/backup-pre-cleanup-20260830/bench_sine_53_wide_intel.c -o bench_sine_53_wide_intel.c
+          curl -fsSL https://raw.githubusercontent.com/prakharraj-numerics/Draft/backup-pre-cleanup-20260830/sine_53_coeff_source.c -o sine_53_coeff_source.c
+          sed -i 's/^int main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/int s53f2_disabled_main(void){int cpu=pin();mkl_set_num_threads_local(1);printf("S53F2_DOMAIN/' bench_sine_53_wide_fast2.c
+          sed -i 's/#define SF_K 12/#define SF_K 8/' sine_53_coeff_source.c
+          sed -i 's/#define SF_LUT_N ((1UL << SF_K) + 1UL)/#define SF_LUT_N 403UL/' sine_53_coeff_source.c
+          sed -i 's/#define KGRID 4096.0/#define KGRID 256.0/' bench_sine_53_wide_intel.c
+          sed -i 's|#define INVK (1.0/4096.0)|#define INVK (1.0/256.0)|' bench_sine_53_wide_intel.c
+          cp sine53_x50_unit_production.c generated_x50.c
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p=Path('generated_x50.c'); s=p.read_text()
+          s,n=re.subn(r'\nint main\(void\)\s*\{', '\nint sine53_embedded_main(void)\n{', s, count=1)
+          if n != 1: raise SystemExit(f'production main rename count={n}')
+          p.write_text(s)
+          PY
+          echo SOURCE_SHA=$(sha256sum sine53_x50_unit_production.c | awk '{print $1}')
+      - name: Write exact adapter and checker
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          cat > /tmp/x50_adapter.c <<'C'
+          #define _GNU_SOURCE
+          #include <stddef.h>
+          #include "generated_x50.c"
+          static s53w_kernel *K;
+          int x50_init(void){K=kernel_create(2);return K!=NULL;}
+          void x50_eval_exact(double*out,const double*in,size_t n){octant_eval_v8(K,in,out,n);}
+          void x50_close(void){if(K){kernel_destroy(K);K=NULL;}flint_cleanup_master();}
+          C
+          cat > /tmp/x50_check.cpp <<'CPP'
+          #include <mpfr.h>
+          #include <algorithm>
+          #include <cfloat>
+          #include <cmath>
+          #include <cstdint>
+          #include <cstdio>
+          #include <cstring>
+          #include <vector>
+          extern "C" int x50_init(void); extern "C" void x50_eval_exact(double*,const double*,size_t); extern "C" void x50_close(void);
+          static uint64_t bits(double x){uint64_t u;memcpy(&u,&x,8);return u;} static double frombits(uint64_t u){double x;memcpy(&x,&u,8);return x;}
+          static uint64_t ord(double x){uint64_t u=bits(x);return(u>>63)?~u:(u|UINT64_C(0x8000000000000000));} static uint64_t ulpd(double a,double b){if(a==b)return 0;auto x=ord(a),y=ord(b);return x>y?x-y:y-x;}
+          struct S{uint64_t n=0,e=0,o=0,g=0,m=0;double x=0,y=0,r=0;};
+          static S ck(const char*t,const std::vector<double>&x){std::vector<double>y(x.size());x50_eval_exact(y.data(),x.data(),x.size());mpfr_t a,s;mpfr_init2(a,512);mpfr_init2(s,512);S z;for(size_t i=0;i<x.size();i++){mpfr_set_d(a,x[i],MPFR_RNDN);mpfr_sin(s,a,MPFR_RNDN);double r=mpfr_get_d(s,MPFR_RNDN);auto u=ulpd(y[i],r);z.n++;z.e+=u==0;z.o+=u==1;z.g+=u>=2;if(u>z.m){z.m=u;z.x=x[i];z.y=y[i];z.r=r;}}mpfr_clear(s);mpfr_clear(a);printf("X50_EXACT tag=%s total=%llu exact=%llu one=%llu ge2=%llu maxulp=%llu worst_x=%.17g got=%.17g ref=%.17g\n",t,(unsigned long long)z.n,(unsigned long long)z.e,(unsigned long long)z.o,(unsigned long long)z.g,(unsigned long long)z.m,z.x,z.y,z.r);return z;}
+          static void nbr(std::vector<double>&v,double c,uint64_t r){uint64_t b=bits(c);v.reserve(2*r+1);for(uint64_t k=r;k>0;k--)v.push_back(frombits(b-k));v.push_back(c);for(uint64_t k=1;k<=r;k++)v.push_back(frombits(b+k));}
+          int main(){if(!x50_init())return 2;uint64_t mx=0,ge2=0;
+            std::vector<double>a;a.reserve(1052000);a.push_back(0);for(uint64_t u=1;u<=1048576;u++)a.push_back(frombits(u));for(int e=-1022;e<=-8;e++){double p=ldexp(1.0,e);a.push_back(nextafter(p,0.0));a.push_back(p);a.push_back(nextafter(p,INFINITY));}auto A=ck("very_close_zero",a);mx=std::max(mx,A.m);ge2+=A.g;
+            const size_t N=524288;std::vector<double>b;b.reserve(N);for(size_t i=0;i<N;i++)b.push_back(.025*((double)i+.5)/(double)N);auto B=ck("zero_to_0p025_dense",b);mx=std::max(mx,B.m);ge2+=B.g;
+            double lo=1.5/256.0,hi=2.5/256.0;std::vector<double>c;c.reserve(N+6);c.push_back(nextafter(lo,0.0));c.push_back(lo);c.push_back(nextafter(lo,INFINITY));for(size_t i=0;i<N;i++)c.push_back(lo+(hi-lo)*((double)i+.5)/(double)N);c.push_back(nextafter(hi,0.0));c.push_back(hi);c.push_back(nextafter(hi,INFINITY));auto C=ck("j2_full_rounding_cell",c);mx=std::max(mx,C.m);ge2+=C.g;
+            mpfr_t p;mpfr_init2(p,512);mpfr_const_pi(p,MPFR_RNDN);mpfr_div_ui(p,p,4,MPFR_RNDN);double p4=mpfr_get_d(p,MPFR_RNDN);mpfr_clear(p);std::vector<double>d;nbr(d,p4,1048576);auto D=ck("pi_over_4_plusminus_1048576_ulps",d);mx=std::max(mx,D.m);ge2+=D.g;
+            std::vector<double>e;e.reserve(N);for(size_t i=0;i<N;i++)e.push_back((p4-.002)+.004*((double)i+.5)/(double)N);auto E=ck("pi_over_4_pm_0p002_dense",e);mx=std::max(mx,E.m);ge2+=E.g;
+            std::vector<double>f;f.reserve(262144);for(size_t i=0;i<262144;i++)f.push_back(((double)i+.5)/262144.0);auto F=ck("full_0_to_1_dense",f);mx=std::max(mx,F.m);ge2+=F.g;
+            x50_close();printf("X50_EXACT_OVERALL maxulp=%llu ge2_total=%llu status=%s reference=MPFR512_RNDN\n",(unsigned long long)mx,(unsigned long long)ge2,mx<=1?"PASS":"FAIL");return mx<=1?0:1;}
+          CPP
+      - name: Build and run exact production X50
+        if: steps.gate.outputs.eligible == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          MKLROOT=/opt/intel/oneapi/mkl/latest; CC=/opt/intel/oneapi/compiler/latest/bin/icx; CXX=/opt/intel/oneapi/compiler/latest/bin/icpx
+          INC="-DNDEBUG -I$FLINT_PREFIX/include -I$MKLROOT/include -I."; LIBS="-L$FLINT_PREFIX/lib -Wl,-rpath,$FLINT_PREFIX/lib -lflint -lmpfr -lgmp -L$MKLROOT/lib -Wl,-rpath,$MKLROOT/lib -Wl,--no-as-needed -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lm -ldl"; COMMON='-O3 -march=native -fp-model=precise -fno-math-errno'
+          "$CC" $COMMON $INC -c /tmp/x50_adapter.c -o /tmp/x50_adapter.o
+          "$CXX" -std=c++17 $COMMON $INC /tmp/x50_check.cpp /tmp/x50_adapter.o -o /tmp/x50_check $LIBS
+          export LD_LIBRARY_PATH="$FLINT_PREFIX/lib:$MKLROOT/lib:${LD_LIBRARY_PATH:-}"
+          { echo "CPU=$(lscpu | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')"; /tmp/x50_check; } | tee /tmp/x50-exact2-results.txt
+      - uses: actions/upload-artifact@v4
+        if: steps.gate.outputs.eligible == '1' && always()
+        with:
+          name: x50-exact2-${{ matrix.slot }}
+          path: /tmp/x50-exact2-results.txt
+          if-no-files-found: ignore
